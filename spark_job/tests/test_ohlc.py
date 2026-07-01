@@ -8,8 +8,6 @@ Kafka/stream needed.
 
 from datetime import datetime
 
-import pytest
-from pyspark.sql import SparkSession
 from pyspark.sql.types import (
     DoubleType,
     LongType,
@@ -30,19 +28,6 @@ TRADES_SCHEMA = StructType(
         StructField("trade_id", LongType()),
     ]
 )
-
-
-@pytest.fixture(scope="module")
-def spark():
-    s = (
-        SparkSession.builder.master("local[1]")
-        .appName("ohlc-tests")
-        .config("spark.sql.session.timeZone", "UTC")
-        .config("spark.sql.shuffle.partitions", "1")
-        .getOrCreate()
-    )
-    yield s
-    s.stop()
 
 
 def _candles(spark, rows):
