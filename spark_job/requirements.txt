@@ -1,4 +1,5 @@
 pyspark==4.1.2
 psycopg2-binary==2.9.10
+prometheus-client>=0.21,<1
 pytest>=8,<9
 testcontainers[postgres]>=4,<5

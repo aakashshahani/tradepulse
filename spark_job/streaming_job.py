@@ -29,11 +29,13 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from datetime import timezone
 from functools import reduce
 
 import psycopg2
+from prometheus_client import Gauge, start_http_server
 from psycopg2.extras import execute_values
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
@@ -70,6 +72,22 @@ CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/opt/spark_checkpoints")
 # Liveness file refreshed on every streaming-query progress event; the container
 # HEALTHCHECK marks the job unhealthy if it goes stale (stream stalled/died).
 HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/spark_heartbeat")
+
+# Prometheus metrics, exposed on the driver at spark_job:METRICS_PORT/metrics and
+# fed from streaming-query progress events (see HeartbeatListener).
+METRICS_PORT = int(os.getenv("METRICS_PORT", "8001"))
+BATCH_DURATION_MS = Gauge(
+    "tradepulse_spark_batch_duration_ms", "Micro-batch trigger duration", ["query"]
+)
+PROCESSED_RATE = Gauge(
+    "tradepulse_spark_processed_rows_per_sec", "Rows processed per second", ["query"]
+)
+INPUT_RATE = Gauge(
+    "tradepulse_spark_input_rows_per_sec", "Rows arriving per second", ["query"]
+)
+NUM_INPUT_ROWS = Gauge(
+    "tradepulse_spark_num_input_rows", "Rows in the last micro-batch", ["query"]
+)
 WINDOW_DURATION = os.getenv("WINDOW_DURATION", "1 minute")
 WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "1 minute")
 
@@ -126,7 +144,8 @@ def touch_heartbeat() -> None:
 
 
 class HeartbeatListener(StreamingQueryListener):
-    """Touch the heartbeat file on every micro-batch progress event."""
+    """Touch the heartbeat file and record Prometheus metrics on every
+    micro-batch progress event."""
 
     def onQueryStarted(self, event):
         touch_heartbeat()
@@ -139,6 +158,47 @@ class HeartbeatListener(StreamingQueryListener):
 
     def onQueryTerminated(self, event):
         pass
+
+
+def _num(value) -> float:
+    """Coerce a progress value to a float, treating None/NaN as 0."""
+    try:
+        f = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return 0.0 if f != f else f  # f != f is True only for NaN
+
+
+def update_query_metrics(spark: SparkSession, names: dict) -> None:
+    """Read each active query's lastProgress (a dict in PySpark) into the gauges.
+
+    Queries are labelled via a {query id -> name} map rather than queryName,
+    because naming the query triggers an NPE in the Kafka source's progress
+    metrics on this Spark/connector version.
+    """
+    for query in spark.streams.active:
+        p = query.lastProgress
+        if not p:
+            continue
+        name = names.get(query.id, "query")
+        NUM_INPUT_ROWS.labels(name).set(_num(p.get("numInputRows")))
+        INPUT_RATE.labels(name).set(_num(p.get("inputRowsPerSecond")))
+        PROCESSED_RATE.labels(name).set(_num(p.get("processedRowsPerSecond")))
+        dur = (p.get("durationMs") or {}).get("triggerExecution")
+        if dur is not None:
+            BATCH_DURATION_MS.labels(name).set(_num(dur))
+
+
+def start_metrics_thread(spark: SparkSession, names: dict) -> None:
+    def loop():
+        while True:
+            try:
+                update_query_metrics(spark, names)
+            except Exception:  # noqa: BLE001 - metrics must never crash the job
+                pass
+            time.sleep(5)
+
+    threading.Thread(target=loop, daemon=True).start()
 
 
 def valid_condition():
@@ -380,6 +440,7 @@ def make_malformed_logger():
 def main() -> None:
     spark = build_spark()
     touch_heartbeat()  # seed the file so the HEALTHCHECK has something to read
+    start_http_server(METRICS_PORT)  # expose /metrics for Prometheus
     spark.streams.addListener(HeartbeatListener())
     log.info("reading kafka %s topic=%s", KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC)
 
@@ -398,19 +459,27 @@ def main() -> None:
     candles = aggregate_candles(valid, streaming=True)
 
     # Both queries run until termination; handles are tracked by spark.streams.
-    (
+    # (No queryName: it triggers an NPE in the Kafka source progress metrics.)
+    # A processing-time trigger keeps batches aligned with data arrival. The
+    # default (as-fast-as-possible) trigger fires a flood of empty batches, which
+    # trips an NPE in the Kafka connector's progress metrics on empty offsets.
+    candle_query = (
         candles.writeStream.outputMode("append")
+        .trigger(processingTime="5 seconds")
         .foreachBatch(make_sink(ALERT_THRESHOLD_PCT))
         .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "candles"))
         .start()
     )
-    (
+    malformed_query = (
         malformed.writeStream.outputMode("append")
+        .trigger(processingTime="5 seconds")
         .foreachBatch(make_malformed_logger())
         .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "malformed"))
         .start()
     )
 
+    query_names = {candle_query.id: "candles", malformed_query.id: "malformed"}
+    start_metrics_thread(spark, query_names)
     log.info("streaming started; awaiting termination")
     spark.streams.awaitAnyTermination()
 

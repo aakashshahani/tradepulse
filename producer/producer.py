@@ -21,6 +21,7 @@ from collections import defaultdict
 
 import websockets
 from confluent_kafka import Producer
+from prometheus_client import Counter, start_http_server
 from websockets.asyncio.client import connect
 
 # --- Configuration (env-driven, with sensible local defaults) --------------
@@ -48,6 +49,12 @@ BACKOFF_CAP_S = 30.0
 
 # How often to emit a throughput line.
 REPORT_INTERVAL_S = 10.0
+
+# Prometheus metrics (scraped by Prometheus at producer:METRICS_PORT/metrics).
+METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
+TRADES_PUBLISHED = Counter(
+    "tradepulse_trades_total", "Trades published to Kafka", ["symbol"]
+)
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -175,6 +182,7 @@ def handle_message(raw: str, producer: Producer, meter: ThroughputMeter) -> None
             return
         publish_trade(producer, record)
         meter.record(record["symbol"])
+        TRADES_PUBLISHED.labels(record["symbol"]).inc()
     elif msg_type == "heartbeat":
         log.debug("heartbeat %s seq=%s", msg.get("product_id"), msg.get("sequence"))
     elif msg_type == "subscriptions":
@@ -265,6 +273,7 @@ async def main() -> None:
     stop = asyncio.Event()
     install_signal_handlers(stop)
     touch_heartbeat()  # seed the file so the HEALTHCHECK has something to read
+    start_http_server(METRICS_PORT)  # expose /metrics for Prometheus
 
     producer = build_producer()
     meter = ThroughputMeter()
