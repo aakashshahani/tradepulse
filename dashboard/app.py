@@ -31,9 +31,9 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "tradepulse")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "tradepulse")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change_me")
 
-# Chart timeframe options (label -> number of 1-minute candles).
-TIMEFRAMES = {"30m": 30, "1h": 60, "3h": 180, "All": 2000}
-KPI_LOOKBACK = 20   # candles used for the KPI window-change + sparkline
+# Chart timeframe options (label -> lookback minutes; None means all history).
+TIMEFRAMES = {"30m": 30, "1h": 60, "3h": 180, "All": None}
+KPI_LOOKBACK_MIN = 20   # minutes used for the KPI window-change + sparkline
 MA_FAST = 10
 MA_SLOW = 20
 ALERT_LIMIT = 12
@@ -68,24 +68,38 @@ def latest_candle_time(engine):
         return conn.execute(text("SELECT max(window_end) FROM candles")).scalar()
 
 
-def candles_for(engine, symbol: str, limit: int) -> pd.DataFrame:
-    sql = text(
+def candles_for(engine, symbol: str, minutes) -> pd.DataFrame:
+    """Candles for a symbol within the last `minutes` (None means all history).
+
+    Filtering by time (not row count) is what makes 30m/1h/3h actually differ,
+    and it drops old orphan candles from earlier runs so gaps don't draw long
+    diagonal MA/VWAP lines across empty time.
+    """
+    base = (
         "SELECT window_start, window_end, open, high, low, close, volume "
-        "FROM candles WHERE symbol = :s ORDER BY window_start DESC LIMIT :n"
+        "FROM candles WHERE symbol = :s"
     )
-    df = pd.read_sql(sql, engine, params={"s": symbol, "n": limit})
+    if minutes is None:
+        sql = text(base + " ORDER BY window_start DESC LIMIT 2000")
+        params = {"s": symbol}
+    else:
+        sql = text(
+            base + " AND window_start >= now() - (:mins * interval '1 minute') "
+            "ORDER BY window_start"
+        )
+        params = {"s": symbol, "mins": minutes}
+    df = pd.read_sql(sql, engine, params=params)
     return df.sort_values("window_start").reset_index(drop=True)
 
 
-def kpi_frame(engine, lookback: int = KPI_LOOKBACK) -> pd.DataFrame:
-    """Last `lookback` candles per symbol, for KPI price/change/sparkline."""
+def kpi_frame(engine, minutes: int = KPI_LOOKBACK_MIN) -> pd.DataFrame:
+    """Candles per symbol within the last `minutes`, for KPI change/sparkline."""
     sql = text(
-        "SELECT symbol, open, close, window_start FROM ("
-        "  SELECT symbol, open, close, window_start,"
-        "         row_number() OVER (PARTITION BY symbol ORDER BY window_start DESC) rn"
-        "  FROM candles) t WHERE rn <= :n ORDER BY symbol, window_start"
+        "SELECT symbol, open, close, window_start FROM candles "
+        "WHERE window_start >= now() - (:mins * interval '1 minute') "
+        "ORDER BY symbol, window_start"
     )
-    return pd.read_sql(sql, engine, params={"n": lookback})
+    return pd.read_sql(sql, engine, params={"mins": minutes})
 
 
 def recent_alerts(engine, limit: int = ALERT_LIMIT) -> pd.DataFrame:
@@ -250,7 +264,7 @@ def render_metrics(engine, last_ts):
         color = UP if (change is None or change >= 0) else DOWN
         spark = sparkline_svg(closes, color)
         col.markdown(
-            price_card(symbol, price, change, len(closes), spark),
+            price_card(symbol, price, change, KPI_LOOKBACK_MIN, spark),
             unsafe_allow_html=True,
         )
 
