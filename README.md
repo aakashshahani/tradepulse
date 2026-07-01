@@ -9,7 +9,7 @@ Coinbase WebSocket to Kafka to Spark structured streaming to Postgres to a
 Streamlit dashboard, built in phases.
 
 <p align="center">
-  <img src="assets/dashboard.png" alt="TradePulse dashboard" width="100%">
+  <img src="assets/dashboard.gif" alt="TradePulse dashboard" width="100%">
 </p>
 
 The dashboard: live candlestick + volume charts with MA and VWAP overlays, a KPI
