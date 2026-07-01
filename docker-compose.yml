@@ -138,6 +138,8 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       PRODUCT_IDS: ${PRODUCT_IDS:-BTC-USD,ETH-USD,SOL-USD}
+      # Same value the spark_job uses, so the alerts caption shows the real threshold.
+      ALERT_THRESHOLD_PCT: ${ALERT_THRESHOLD_PCT:-0.3}
     ports:
       - "8501:8501"
 

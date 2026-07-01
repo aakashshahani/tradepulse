@@ -38,6 +38,10 @@ MA_FAST = 10
 MA_SLOW = 20
 ALERT_LIMIT = 12
 
+# Shown on the alerts panel so the active threshold is never implied silently.
+# Kept in sync with the spark_job service via the same env var.
+ALERT_THRESHOLD_PCT = float(os.getenv("ALERT_THRESHOLD_PCT", "0.3"))
+
 # Palette (matches the project banner).
 UP = "#34d399"
 DOWN = "#f87171"
@@ -274,8 +278,21 @@ def render_metrics(engine, last_ts):
 
 def candle_figure(df: pd.DataFrame) -> go.Figure:
     df = df.copy()
+    # Reindex onto a complete 1-minute grid so missing minutes become explicit
+    # NaN rows. With connectgaps=False this breaks the MA/VWAP lines across data
+    # gaps instead of drawing a straight interpolation over a period that had no
+    # candles (and no trades).
+    if len(df) > 1:
+        df = df.set_index("window_start")
+        grid = pd.date_range(df.index.min(), df.index.max(), freq="1min")
+        df = df.reindex(grid)
+        df.index.name = "window_start"
+        df = df.reset_index()
+
     df["ma_fast"] = df["close"].rolling(MA_FAST, min_periods=MA_FAST).mean()
     df["ma_slow"] = df["close"].rolling(MA_SLOW, min_periods=MA_SLOW).mean()
+    # Session VWAP over the visible window, from candle typical prices. cumsum
+    # skips NaN, so gap rows stay NaN (line breaks) rather than interpolating.
     typical = (df["high"] + df["low"] + df["close"]) / 3.0
     df["vwap"] = (typical * df["volume"]).cumsum() / df["volume"].cumsum().replace(0, pd.NA)
 
@@ -318,8 +335,9 @@ def candle_figure(df: pd.DataFrame) -> go.Figure:
         row=2, col=1,
     )
 
-    last_close = float(df["close"].iloc[-1])
-    last_up = float(df["close"].iloc[-1]) >= float(df["open"].iloc[-1])
+    valid = df.dropna(subset=["close", "open"])
+    last_close = float(valid["close"].iloc[-1])
+    last_up = last_close >= float(valid["open"].iloc[-1])
     tag_color = UP if last_up else DOWN
     fig.add_hline(y=last_close, line_dash="dot", line_color=tag_color, line_width=1,
                   opacity=0.6, row=1, col=1)
@@ -350,7 +368,10 @@ def candle_figure(df: pd.DataFrame) -> go.Figure:
     fig.update_xaxes(gridcolor=GRID, zeroline=False, showgrid=True, tickformat="%H:%M", row=1, col=1)
     fig.update_xaxes(gridcolor=GRID, zeroline=False, tickformat="%H:%M",
                      title_text="time (UTC)", title_font=dict(size=11), row=2, col=1)
-    fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", tickprefix="$", row=1, col=1)
+    lo, hi = float(df["low"].min()), float(df["high"].max())
+    pad = (hi - lo) * 0.08 or 1.0
+    fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", tickprefix="$",
+                     range=[lo - pad, hi + pad], row=1, col=1)
     fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", title_text="vol", row=2, col=1)
     return fig
 
@@ -391,7 +412,11 @@ def render_chart(engine):
 
 
 def render_alerts(engine):
-    st.markdown('<div class="tp-section">Recent volatility alerts <span class="tp-sub">(times UTC)</span></div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="tp-section">Recent volatility alerts '
+        f'<span class="tp-sub">(moves over {ALERT_THRESHOLD_PCT:g}% · times UTC)</span></div>',
+        unsafe_allow_html=True,
+    )
     alerts = recent_alerts(engine)
     if alerts.empty:
         st.markdown('<div class="tp-sub">No alerts yet.</div>', unsafe_allow_html=True)
