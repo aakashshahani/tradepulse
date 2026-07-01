@@ -92,7 +92,7 @@ services:
         # Wait until the topic has been created with its partition count.
         condition: service_completed_successfully
     environment:
-      # Internal Docker network hostname — NOT localhost.
+      # Internal Docker network hostname, NOT localhost.
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: ${KAFKA_TOPIC:-trades.raw}
       COINBASE_WS_URL: ${COINBASE_WS_URL:-wss://ws-feed.exchange.coinbase.com}

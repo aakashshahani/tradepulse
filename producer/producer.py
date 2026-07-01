@@ -5,7 +5,7 @@ Connects to Coinbase's public Exchange WebSocket feed, transforms each
 Kafka topic `trades.raw`. Survives disconnects via exponential backoff with
 jitter, and shuts down cleanly on SIGINT/SIGTERM.
 
-No producer/dashboard/Spark logic here — this phase is the bridge only.
+No producer/dashboard/Spark logic here; this phase is the bridge only.
 """
 
 from __future__ import annotations
@@ -180,7 +180,7 @@ def handle_message(raw: str, producer: Producer, meter: ThroughputMeter) -> None
     elif msg_type == "subscriptions":
         log.info("subscription confirmed: %s", msg.get("channels"))
     elif msg_type == "error":
-        # Log, do not crash — e.g. bad product_id or rate limiting.
+        # Log, do not crash. E.g. bad product_id or rate limiting.
         log.error("coinbase error: %s", msg.get("message"))
     else:
         # last_match, ticker, and anything else we didn't ask to act on.
