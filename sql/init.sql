@@ -48,3 +48,12 @@ CREATE TABLE IF NOT EXISTS raw_trades (
 
 CREATE INDEX IF NOT EXISTS idx_raw_trades_symbol_ts
     ON raw_trades (symbol, ts DESC);
+
+-- Small key/value store for pipeline observability counters (e.g. the count of
+-- malformed records the Spark job has dropped). Read-only surface for the
+-- dashboard; the Spark job upserts into it.
+CREATE TABLE IF NOT EXISTS pipeline_metrics (
+    metric     TEXT        PRIMARY KEY,
+    value      BIGINT      NOT NULL DEFAULT 0,
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);

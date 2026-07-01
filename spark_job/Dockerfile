@@ -4,6 +4,7 @@ FROM eclipse-temurin:17-jre-jammy
 ENV PYTHONUNBUFFERED=1 \
     SPARK_IVY_DIR=/opt/.ivy2 \
     VIRTUAL_ENV=/opt/venv \
+    HEARTBEAT_FILE=/tmp/spark_heartbeat \
     PATH=/opt/venv/bin:$PATH
 
 # Python + procps (Spark shells out to `ps`).
@@ -28,5 +29,10 @@ SparkSession.builder.master('local[1]') \
   .getOrCreate().stop()"
 
 COPY streaming_job.py .
+
+# Unhealthy if the job has not made streaming progress in the last 60s. The
+# long start-period covers JVM + Spark startup and first micro-batch.
+HEALTHCHECK --interval=20s --timeout=5s --start-period=90s --retries=3 \
+    CMD test "$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT_FILE" 2>/dev/null || echo 0) ))" -lt 60
 
 CMD ["python", "streaming_job.py"]

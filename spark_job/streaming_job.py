@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import timezone
 from functools import reduce
 
@@ -36,6 +37,7 @@ import psycopg2
 from psycopg2.extras import execute_values
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
+from pyspark.sql.streaming import StreamingQueryListener
 from pyspark.sql.types import (
     DoubleType,
     LongType,
@@ -62,6 +64,9 @@ POSTGRES_USER = os.getenv("POSTGRES_USER", "tradepulse")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change_me")
 
 CHECKPOINT_DIR = os.getenv("CHECKPOINT_DIR", "/opt/spark_checkpoints")
+# Liveness file refreshed on every streaming-query progress event; the container
+# HEALTHCHECK marks the job unhealthy if it goes stale (stream stalled/died).
+HEARTBEAT_FILE = os.getenv("HEARTBEAT_FILE", "/tmp/spark_heartbeat")
 WINDOW_DURATION = os.getenv("WINDOW_DURATION", "1 minute")
 WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "1 minute")
 
@@ -106,6 +111,31 @@ def build_spark() -> SparkSession:
     )
     spark.sparkContext.setLogLevel("WARN")
     return spark
+
+
+def touch_heartbeat() -> None:
+    """Refresh the liveness file's mtime for the container HEALTHCHECK."""
+    try:
+        with open(HEARTBEAT_FILE, "w") as f:
+            f.write(str(time.time()))
+    except OSError as exc:
+        log.warning("could not update heartbeat file %s: %s", HEARTBEAT_FILE, exc)
+
+
+class HeartbeatListener(StreamingQueryListener):
+    """Touch the heartbeat file on every micro-batch progress event."""
+
+    def onQueryStarted(self, event):
+        touch_heartbeat()
+
+    def onQueryProgress(self, event):
+        touch_heartbeat()
+
+    def onQueryIdle(self, event):
+        touch_heartbeat()
+
+    def onQueryTerminated(self, event):
+        pass
 
 
 def valid_condition():
@@ -295,17 +325,42 @@ def make_sink(threshold: float):
     return _write
 
 
+METRIC_UPSERT = (
+    "INSERT INTO pipeline_metrics (metric, value, updated_at) "
+    "VALUES ('malformed_dropped', %s, now()) "
+    "ON CONFLICT (metric) DO UPDATE "
+    "SET value = pipeline_metrics.value + EXCLUDED.value, updated_at = now()"
+)
+
+
 def make_malformed_logger():
+    """Count malformed records per batch: log them and add to the cumulative
+    pipeline_metrics counter the dashboard reads."""
+
     def _log(batch_df: DataFrame, batch_id: int) -> None:
         dropped = batch_df.count()
-        if dropped > 0:
-            log.warning("batch %s: dropped %d malformed record(s)", batch_id, dropped)
+        if dropped == 0:
+            return
+        log.warning("batch %s: dropped %d malformed record(s)", batch_id, dropped)
+        # A metrics-write failure must not take down the pipeline.
+        try:
+            conn = _pg_connect()
+            try:
+                with conn:
+                    with conn.cursor() as cur:
+                        cur.execute(METRIC_UPSERT, (dropped,))
+            finally:
+                conn.close()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("batch %s: could not update malformed metric: %s", batch_id, exc)
 
     return _log
 
 
 def main() -> None:
     spark = build_spark()
+    touch_heartbeat()  # seed the file so the HEALTHCHECK has something to read
+    spark.streams.addListener(HeartbeatListener())
     log.info("reading kafka %s topic=%s", KAFKA_BOOTSTRAP_SERVERS, KAFKA_TOPIC)
 
     raw = (
@@ -322,14 +377,14 @@ def main() -> None:
 
     candles = aggregate_candles(valid, streaming=True)
 
-    candle_query = (
+    # Both queries run until termination; handles are tracked by spark.streams.
+    (
         candles.writeStream.outputMode("append")
         .foreachBatch(make_sink(ALERT_THRESHOLD_PCT))
         .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "candles"))
         .start()
     )
-
-    malformed_query = (
+    (
         malformed.writeStream.outputMode("append")
         .foreachBatch(make_malformed_logger())
         .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "malformed"))

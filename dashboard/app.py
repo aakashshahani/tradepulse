@@ -72,6 +72,15 @@ def latest_candle_time(engine):
         return conn.execute(text("SELECT max(window_end) FROM candles")).scalar()
 
 
+def malformed_dropped(engine) -> int:
+    """Cumulative count of malformed records the Spark job has dropped."""
+    with engine.connect() as conn:
+        v = conn.execute(
+            text("SELECT value FROM pipeline_metrics WHERE metric = 'malformed_dropped'")
+        ).scalar()
+    return int(v) if v is not None else 0
+
+
 def candles_for(engine, symbol: str, minutes) -> pd.DataFrame:
     """Candles for a symbol within the last `minutes` (None means all history).
 
@@ -229,7 +238,7 @@ def price_card(symbol: str, price: float, change_pct, minutes: int, spark_html: 
     )
 
 
-def health_card(age_seconds: float):
+def health_card(age_seconds: float, dropped: int):
     if age_seconds <= 180:
         color, label = UP, "Live"
     elif age_seconds <= 360:
@@ -242,7 +251,7 @@ def health_card(age_seconds: float):
         f'<div class="tp-card"><div class="label">Pipeline health</div>'
         f'<div class="value"><span class="tp-status"><span class="sdot" style="background:{color}"></span>{label}</span></div>'
         f'<div class="sublabel">watermark lag is normal</div>'
-        f'<div class="delta muted">last candle {ago} ago</div></div>'
+        f'<div class="delta muted">last candle {ago} ago · {dropped:,} malformed dropped</div></div>'
     )
 
 
@@ -273,7 +282,7 @@ def render_metrics(engine, last_ts):
         )
 
     age = (datetime.now(timezone.utc) - last_ts).total_seconds()
-    cols[-1].markdown(health_card(age), unsafe_allow_html=True)
+    cols[-1].markdown(health_card(age, malformed_dropped(engine)), unsafe_allow_html=True)
 
 
 def candle_figure(df: pd.DataFrame) -> go.Figure:
