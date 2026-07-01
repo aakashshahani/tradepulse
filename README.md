@@ -37,8 +37,10 @@ flowchart LR
   records, and computes per-symbol 1-minute candles with a watermark. Finalized
   candles are written to `candles`; candles whose move exceeds a threshold also
   write to `alerts`.
-- **dashboard** reads `candles`, `alerts`, and a metrics table (read-only) and
-  renders live charts, KPIs, and an alerts feed, auto-refreshing every 10s.
+- **dashboard** reads `candles`, `alerts`, a live-price cache (`raw_trades`), and
+  a metrics table (read-only) and renders live charts, KPIs (with a live
+  per-symbol price fresher than the candle close), and an alerts feed,
+  auto-refreshing every 10s.
 
 ## Quick start
 
@@ -208,8 +210,6 @@ on every push and PR.
 
 Deferred deliberately, not missing:
 
-- **Sub-second raw-trade ticker.** Have the producer also write to `raw_trades`
-  so the dashboard can show a live price between 1-minute candle closes.
 - **Schema Registry + Avro.** Replace the JSON Schema contract in `schemas/` with
   a registry-enforced schema for producer/consumer compatibility guarantees.
 

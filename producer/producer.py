@@ -19,9 +19,11 @@ import signal
 import time
 from collections import defaultdict
 
+import psycopg2
 import websockets
 from confluent_kafka import Producer
 from prometheus_client import Counter, start_http_server
+from psycopg2.extras import execute_values
 from websockets.asyncio.client import connect
 
 # --- Configuration (env-driven, with sensible local defaults) --------------
@@ -55,6 +57,23 @@ METRICS_PORT = int(os.getenv("METRICS_PORT", "8000"))
 TRADES_PUBLISHED = Counter(
     "tradepulse_trades_total", "Trades published to Kafka", ["symbol"]
 )
+
+# Live-ticker: the latest price per symbol is written to the raw_trades table
+# roughly once a second so the dashboard can show a live price between the
+# 1-minute candle closes. This is a best-effort cache, not the source of truth
+# (candles/alerts still flow through Kafka -> Spark -> Postgres).
+RAW_TRADES_ENABLED = os.getenv("RAW_TRADES_ENABLED", "true").lower() == "true"
+RAW_TRADES_FLUSH_S = float(os.getenv("RAW_TRADES_FLUSH_S", "1.0"))
+RAW_TRADES_RETENTION_MIN = int(os.getenv("RAW_TRADES_RETENTION_MIN", "10"))
+POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
+POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "tradepulse")
+POSTGRES_USER = os.getenv("POSTGRES_USER", "tradepulse")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change_me")
+
+# symbol -> latest trade record; updated on every match, flushed periodically.
+_latest_trades: dict[str, dict] = {}
+_pg_conn = None
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -183,6 +202,7 @@ def handle_message(raw: str, producer: Producer, meter: ThroughputMeter) -> None
         publish_trade(producer, record)
         meter.record(record["symbol"])
         TRADES_PUBLISHED.labels(record["symbol"]).inc()
+        _latest_trades[record["symbol"]] = record
     elif msg_type == "heartbeat":
         log.debug("heartbeat %s seq=%s", msg.get("product_id"), msg.get("sequence"))
     elif msg_type == "subscriptions":
@@ -254,6 +274,57 @@ async def report_loop(meter: ThroughputMeter, stop: asyncio.Event) -> None:
             meter.report()
 
 
+def _write_raw_trades(rows, cleanup: bool) -> None:
+    """Blocking Postgres write (runs in an executor). Inserts the latest price
+    per symbol and periodically trims old rows so the buffer stays small."""
+    global _pg_conn
+    try:
+        if _pg_conn is None or _pg_conn.closed:
+            _pg_conn = psycopg2.connect(
+                host=POSTGRES_HOST, port=POSTGRES_PORT, dbname=POSTGRES_DB,
+                user=POSTGRES_USER, password=POSTGRES_PASSWORD,
+            )
+        with _pg_conn:
+            with _pg_conn.cursor() as cur:
+                execute_values(
+                    cur,
+                    "INSERT INTO raw_trades (symbol, ts, price, size) VALUES %s",
+                    rows,
+                )
+                if cleanup:
+                    cur.execute(
+                        "DELETE FROM raw_trades WHERE ts < now() - make_interval(mins => %s)",
+                        (RAW_TRADES_RETENTION_MIN,),
+                    )
+    except Exception as exc:  # noqa: BLE001 - ticker write must not crash the producer
+        log.warning("raw_trades write failed: %s", exc)
+        try:
+            if _pg_conn is not None:
+                _pg_conn.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _pg_conn = None
+
+
+async def raw_trades_loop(stop: asyncio.Event) -> None:
+    """Flush the latest price per symbol to raw_trades ~once a second."""
+    if not RAW_TRADES_ENABLED:
+        return
+    loop = asyncio.get_running_loop()
+    flushes = 0
+    while not stop.is_set():
+        await sleep_or_stop(RAW_TRADES_FLUSH_S, stop)
+        rows = [
+            (r["symbol"], r["ts"], r["price"], r["size"])
+            for r in list(_latest_trades.values())
+        ]
+        if not rows:
+            continue
+        flushes += 1
+        cleanup = flushes % 60 == 0  # trim roughly once a minute
+        await loop.run_in_executor(None, _write_raw_trades, rows, cleanup)
+
+
 def install_signal_handlers(stop: asyncio.Event) -> None:
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -280,13 +351,14 @@ async def main() -> None:
 
     poll_task = asyncio.create_task(poll_loop(producer, stop))
     report_task = asyncio.create_task(report_loop(meter, stop))
+    raw_task = asyncio.create_task(raw_trades_loop(stop))
     try:
         await stream_forever(producer, meter, stop)
     finally:
         log.info("shutting down; flushing Kafka producer...")
-        for task in (poll_task, report_task):
+        for task in (poll_task, report_task, raw_task):
             task.cancel()
-        await asyncio.gather(poll_task, report_task, return_exceptions=True)
+        await asyncio.gather(poll_task, report_task, raw_task, return_exceptions=True)
         remaining = producer.flush(10.0)
         if remaining > 0:
             log.warning("%d message(s) still undelivered after flush", remaining)

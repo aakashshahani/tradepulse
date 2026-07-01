@@ -105,6 +105,16 @@ def candles_for(engine, symbol: str, minutes) -> pd.DataFrame:
     return df.sort_values("window_start").reset_index(drop=True)
 
 
+def live_prices(engine) -> dict:
+    """Latest raw-trade price per symbol (the live ticker between candle closes)."""
+    sql = text(
+        "SELECT DISTINCT ON (symbol) symbol, price, ts "
+        "FROM raw_trades ORDER BY symbol, ts DESC"
+    )
+    df = pd.read_sql(sql, engine)
+    return {r["symbol"]: float(r["price"]) for _, r in df.iterrows()}
+
+
 def kpi_frame(engine, minutes: int = KPI_LOOKBACK_MIN) -> pd.DataFrame:
     """Candles per symbol within the last `minutes`, for KPI change/sparkline."""
     sql = text(
@@ -151,6 +161,7 @@ def inject_css():
         .tp-card .delta { font-size:0.86rem; font-weight:600; margin-top:5px; }
         .tp-card .spark { margin-top:8px; }
         .up { color:#34d399; } .down { color:#f87171; } .muted { color:#8da0c2; }
+        .livedot { display:inline-block; width:7px; height:7px; border-radius:50%; background:#34d399; margin-right:5px; box-shadow:0 0 0 0 rgba(52,211,153,0.7); animation:pulse 1.8s infinite; }
 
         .tp-status { display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:1.2rem; }
         .tp-status .sdot { width:11px; height:11px; border-radius:50%; }
@@ -220,7 +231,7 @@ def sparkline_svg(values, color: str, w: int = 150, h: int = 36) -> str:
 # --- Rendering -------------------------------------------------------------
 
 
-def price_card(symbol: str, price: float, change_pct, minutes: int, spark_html: str):
+def price_card(symbol: str, price: float, change_pct, minutes: int, spark_html: str, is_live: bool):
     if change_pct is None:
         delta_html = '<div class="delta muted">first candle</div>'
     else:
@@ -230,11 +241,15 @@ def price_card(symbol: str, price: float, change_pct, minutes: int, spark_html: 
             f'<div class="delta {cls}">{arrow} {change_pct:+.2f}% '
             f'<span class="muted">last {minutes}m</span></div>'
         )
+    sublabel = (
+        '<div class="sublabel"><span class="livedot"></span>live price</div>'
+        if is_live
+        else '<div class="sublabel">last close</div>'
+    )
     return (
         f'<div class="tp-card"><div class="label">{symbol}</div>'
         f'<div class="value">${price:,.2f}</div>'
-        f'<div class="sublabel">last close</div>'
-        f"{delta_html}{spark_html}</div>"
+        f"{sublabel}{delta_html}{spark_html}</div>"
     )
 
 
@@ -257,6 +272,7 @@ def health_card(age_seconds: float, dropped: int):
 
 def render_metrics(engine, last_ts):
     kf = kpi_frame(engine)
+    live = live_prices(engine)
     cols = st.columns(len(SYMBOLS) + 1)
     for col, symbol in zip(cols, SYMBOLS):
         rows = kf[kf["symbol"] == symbol]
@@ -269,7 +285,9 @@ def render_metrics(engine, last_ts):
             )
             continue
         closes = rows["close"].tolist()
-        price = float(closes[-1])
+        # Prefer the live raw-trade price; fall back to the latest candle close.
+        is_live = symbol in live
+        price = live[symbol] if is_live else float(closes[-1])
         first_open = float(rows["open"].iloc[0])
         change = (price - first_open) / first_open * 100 if first_open else None
         if len(closes) < 2:
@@ -277,7 +295,7 @@ def render_metrics(engine, last_ts):
         color = UP if (change is None or change >= 0) else DOWN
         spark = sparkline_svg(closes, color)
         col.markdown(
-            price_card(symbol, price, change, KPI_LOOKBACK_MIN, spark),
+            price_card(symbol, price, change, KPI_LOOKBACK_MIN, spark, is_live),
             unsafe_allow_html=True,
         )
 
