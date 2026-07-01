@@ -1,8 +1,9 @@
 """TradePulse dashboard (Phase 5).
 
-Read-only Streamlit dashboard over the Postgres candles/alerts tables. It shows,
-per symbol, a candlestick + volume chart of the most recent candles, a live KPI
-row (price, per-candle move, pipeline health), and a combined alerts feed.
+Read-only Streamlit dashboard over the Postgres candles/alerts tables. Per
+symbol it shows a candlestick + volume chart with moving-average and VWAP
+overlays, a live KPI row (last close, window change, sparkline, pipeline
+health), and a combined alerts feed.
 
 No pipeline logic here: this only reads existing tables. The data-fetching and
 render live inside an st.fragment(run_every="10s") so the page refreshes itself
@@ -30,7 +31,11 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "tradepulse")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "tradepulse")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change_me")
 
-CANDLE_LIMIT = 60
+# Chart timeframe options (label -> number of 1-minute candles).
+TIMEFRAMES = {"30m": 30, "1h": 60, "3h": 180, "All": 2000}
+KPI_LOOKBACK = 20   # candles used for the KPI window-change + sparkline
+MA_FAST = 10
+MA_SLOW = 20
 ALERT_LIMIT = 12
 
 # Palette (matches the project banner).
@@ -39,7 +44,9 @@ DOWN = "#f87171"
 INK = "#e6edf7"
 MUTED = "#8da0c2"
 GRID = "#1b2a4a"
-CARD = "#131c30"
+MA_FAST_C = "#22d3ee"
+MA_SLOW_C = "#fbbf24"
+VWAP_C = "#a78bfa"
 
 st.set_page_config(page_title="TradePulse", page_icon="📈", layout="wide")
 
@@ -61,7 +68,7 @@ def latest_candle_time(engine):
         return conn.execute(text("SELECT max(window_end) FROM candles")).scalar()
 
 
-def candles_for(engine, symbol: str, limit: int = CANDLE_LIMIT) -> pd.DataFrame:
+def candles_for(engine, symbol: str, limit: int) -> pd.DataFrame:
     sql = text(
         "SELECT window_start, window_end, open, high, low, close, volume "
         "FROM candles WHERE symbol = :s ORDER BY window_start DESC LIMIT :n"
@@ -70,15 +77,15 @@ def candles_for(engine, symbol: str, limit: int = CANDLE_LIMIT) -> pd.DataFrame:
     return df.sort_values("window_start").reset_index(drop=True)
 
 
-def latest_two_per_symbol(engine) -> pd.DataFrame:
-    """Latest two candles per symbol, for current price + per-candle delta."""
+def kpi_frame(engine, lookback: int = KPI_LOOKBACK) -> pd.DataFrame:
+    """Last `lookback` candles per symbol, for KPI price/change/sparkline."""
     sql = text(
-        "SELECT symbol, close, open, window_start FROM ("
-        "  SELECT symbol, close, open, window_start,"
+        "SELECT symbol, open, close, window_start FROM ("
+        "  SELECT symbol, open, close, window_start,"
         "         row_number() OVER (PARTITION BY symbol ORDER BY window_start DESC) rn"
-        "  FROM candles) t WHERE rn <= 2"
+        "  FROM candles) t WHERE rn <= :n ORDER BY symbol, window_start"
     )
-    return pd.read_sql(sql, engine)
+    return pd.read_sql(sql, engine, params={"n": lookback})
 
 
 def recent_alerts(engine, limit: int = ALERT_LIMIT) -> pd.DataFrame:
@@ -110,16 +117,18 @@ def inject_css():
         .tp-dot { width:9px; height:9px; border-radius:50%; background:#34d399; box-shadow:0 0 0 0 rgba(52,211,153,0.7); animation:pulse 1.8s infinite; }
         @keyframes pulse { 0%{box-shadow:0 0 0 0 rgba(52,211,153,0.6);} 70%{box-shadow:0 0 0 8px rgba(52,211,153,0);} 100%{box-shadow:0 0 0 0 rgba(52,211,153,0);} }
 
-        .tp-card { background:#131c30; border:1px solid #23324f; border-radius:16px; padding:16px 18px; height:100%; }
-        .tp-card .label { color:#8da0c2; font-size:0.78rem; font-weight:600; text-transform:uppercase; letter-spacing:0.6px; }
-        .tp-card .value { color:#f8fafc; font-size:1.65rem; font-weight:700; margin-top:4px; line-height:1.1; }
-        .tp-card .delta { font-size:0.9rem; font-weight:600; margin-top:6px; }
+        .tp-card { background:#131c30; border:1px solid #23324f; border-radius:16px; padding:14px 18px; height:100%; }
+        .tp-card .label { color:#8da0c2; font-size:0.76rem; font-weight:600; text-transform:uppercase; letter-spacing:0.6px; }
+        .tp-card .value { color:#f8fafc; font-size:1.6rem; font-weight:700; margin-top:2px; line-height:1.1; }
+        .tp-card .sublabel { color:#5f7196; font-size:0.68rem; font-weight:600; text-transform:uppercase; letter-spacing:0.5px; }
+        .tp-card .delta { font-size:0.86rem; font-weight:600; margin-top:5px; }
+        .tp-card .spark { margin-top:8px; }
         .up { color:#34d399; } .down { color:#f87171; } .muted { color:#8da0c2; }
 
-        .tp-status { display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:1.25rem; }
+        .tp-status { display:inline-flex; align-items:center; gap:7px; font-weight:700; font-size:1.2rem; }
         .tp-status .sdot { width:11px; height:11px; border-radius:50%; }
 
-        .tp-alert { display:grid; grid-template-columns:64px 96px 120px 1fr; align-items:center;
+        .tp-alert { display:grid; grid-template-columns:96px 96px 150px 1fr; align-items:center;
                     gap:10px; padding:10px 14px; border:1px solid #23324f; border-radius:12px;
                     background:#131c30; margin-bottom:8px; }
         .tp-alert .sym { font-weight:700; color:#f8fafc; }
@@ -153,19 +162,52 @@ def header():
     )
 
 
+# --- Small helpers ----------------------------------------------------------
+
+
+def sparkline_svg(values, color: str, w: int = 150, h: int = 36) -> str:
+    """Inline SVG sparkline of closes, with a soft area fill and an end dot."""
+    vals = [float(v) for v in values if v is not None]
+    if len(vals) < 2:
+        return ""
+    lo, hi = min(vals), max(vals)
+    rng = (hi - lo) or 1.0
+    n = len(vals)
+    pts = []
+    for i, v in enumerate(vals):
+        x = 2 + i / (n - 1) * (w - 4)
+        y = (h - 3) - (v - lo) / rng * (h - 6)
+        pts.append((x, y))
+    line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+    area = f"2,{h} " + line + f" {w - 2},{h}"
+    ex, ey = pts[-1]
+    return (
+        f'<svg class="spark" width="{w}" height="{h}" viewBox="0 0 {w} {h}">'
+        f'<polygon points="{area}" fill="{color}" opacity="0.10"/>'
+        f'<polyline points="{line}" fill="none" stroke="{color}" stroke-width="1.8" '
+        f'stroke-linejoin="round" stroke-linecap="round"/>'
+        f'<circle cx="{ex:.1f}" cy="{ey:.1f}" r="2.6" fill="{color}"/></svg>'
+    )
+
+
 # --- Rendering -------------------------------------------------------------
 
 
-def price_card(symbol: str, price: float, delta_pct):
-    if delta_pct is None:
+def price_card(symbol: str, price: float, change_pct, minutes: int, spark_html: str):
+    if change_pct is None:
         delta_html = '<div class="delta muted">first candle</div>'
     else:
-        cls = "up" if delta_pct >= 0 else "down"
-        arrow = "▲" if delta_pct >= 0 else "▼"
-        delta_html = f'<div class="delta {cls}">{arrow} {delta_pct:+.2f}% <span class="muted">vs prev candle</span></div>'
+        cls = "up" if change_pct >= 0 else "down"
+        arrow = "▲" if change_pct >= 0 else "▼"
+        delta_html = (
+            f'<div class="delta {cls}">{arrow} {change_pct:+.2f}% '
+            f'<span class="muted">last {minutes}m</span></div>'
+        )
     return (
         f'<div class="tp-card"><div class="label">{symbol}</div>'
-        f'<div class="value">${price:,.2f}</div>{delta_html}</div>'
+        f'<div class="value">${price:,.2f}</div>'
+        f'<div class="sublabel">last close</div>'
+        f"{delta_html}{spark_html}</div>"
     )
 
 
@@ -181,62 +223,102 @@ def health_card(age_seconds: float):
     return (
         f'<div class="tp-card"><div class="label">Pipeline health</div>'
         f'<div class="value"><span class="tp-status"><span class="sdot" style="background:{color}"></span>{label}</span></div>'
+        f'<div class="sublabel">watermark lag is normal</div>'
         f'<div class="delta muted">last candle {ago} ago</div></div>'
     )
 
 
 def render_metrics(engine, last_ts):
-    two = latest_two_per_symbol(engine)
+    kf = kpi_frame(engine)
     cols = st.columns(len(SYMBOLS) + 1)
     for col, symbol in zip(cols, SYMBOLS):
-        rows = two[two["symbol"] == symbol].sort_values("window_start", ascending=False)
+        rows = kf[kf["symbol"] == symbol]
         if rows.empty:
             col.markdown(
                 f'<div class="tp-card"><div class="label">{symbol}</div>'
                 f'<div class="value muted">no data</div>'
-                f'<div class="delta muted">waiting</div></div>',
+                f'<div class="sublabel">waiting</div></div>',
                 unsafe_allow_html=True,
             )
             continue
-        price = float(rows.iloc[0]["close"])
-        if len(rows) >= 2:
-            prev = float(rows.iloc[1]["close"])
-            delta = (price - prev) / prev * 100 if prev else 0.0
-        else:
-            delta = None
-        col.markdown(price_card(symbol, price, delta), unsafe_allow_html=True)
+        closes = rows["close"].tolist()
+        price = float(closes[-1])
+        first_open = float(rows["open"].iloc[0])
+        change = (price - first_open) / first_open * 100 if first_open else None
+        if len(closes) < 2:
+            change = None
+        color = UP if (change is None or change >= 0) else DOWN
+        spark = sparkline_svg(closes, color)
+        col.markdown(
+            price_card(symbol, price, change, len(closes), spark),
+            unsafe_allow_html=True,
+        )
 
     age = (datetime.now(timezone.utc) - last_ts).total_seconds()
     cols[-1].markdown(health_card(age), unsafe_allow_html=True)
 
 
 def candle_figure(df: pd.DataFrame) -> go.Figure:
+    df = df.copy()
+    df["ma_fast"] = df["close"].rolling(MA_FAST, min_periods=MA_FAST).mean()
+    df["ma_slow"] = df["close"].rolling(MA_SLOW, min_periods=MA_SLOW).mean()
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    df["vwap"] = (typical * df["volume"]).cumsum() / df["volume"].cumsum().replace(0, pd.NA)
+
+    x = df["window_start"]
     fig = make_subplots(
         rows=2, cols=1, shared_xaxes=True,
         row_heights=[0.74, 0.26], vertical_spacing=0.03,
     )
-    x = df["window_start"]
+
     fig.add_trace(
         go.Candlestick(
             x=x, open=df["open"], high=df["high"], low=df["low"], close=df["close"],
             increasing_line_color=UP, increasing_fillcolor=UP,
             decreasing_line_color=DOWN, decreasing_fillcolor=DOWN,
-            line_width=1, whiskerwidth=0.4, name="", showlegend=False,
+            line_width=1, whiskerwidth=0.4, name="price", showlegend=False,
         ),
         row=1, col=1,
     )
+    for col_name, color, label in (
+        ("ma_fast", MA_FAST_C, f"MA{MA_FAST}"),
+        ("ma_slow", MA_SLOW_C, f"MA{MA_SLOW}"),
+        ("vwap", VWAP_C, "VWAP"),
+    ):
+        dash = "dot" if col_name == "vwap" else "solid"
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=df[col_name], mode="lines", name=label,
+                line=dict(color=color, width=1.5, dash=dash),
+                opacity=0.9, connectgaps=False,
+                hovertemplate=label + " $%{y:,.2f}<extra></extra>",
+            ),
+            row=1, col=1,
+        )
+
     vol_colors = [UP if c >= o else DOWN for o, c in zip(df["open"], df["close"])]
     fig.add_trace(
         go.Bar(x=x, y=df["volume"], marker_color=vol_colors, marker_line_width=0,
-               opacity=0.55, name="", showlegend=False, hovertemplate="vol %{y:.4f}<extra></extra>"),
+               opacity=0.55, name="volume", showlegend=False,
+               hovertemplate="vol %{y:.4f}<extra></extra>"),
         row=2, col=1,
     )
+
     last_close = float(df["close"].iloc[-1])
-    fig.add_hline(y=last_close, line_dash="dot", line_color=MUTED, line_width=1,
-                  opacity=0.5, row=1, col=1)
+    last_up = float(df["close"].iloc[-1]) >= float(df["open"].iloc[-1])
+    tag_color = UP if last_up else DOWN
+    fig.add_hline(y=last_close, line_dash="dot", line_color=tag_color, line_width=1,
+                  opacity=0.6, row=1, col=1)
+    fig.add_annotation(
+        xref="x domain", x=1.0, yref="y", y=last_close,
+        text=f" ${last_close:,.2f} ", showarrow=False,
+        xanchor="left", yanchor="middle",
+        font=dict(color="#0b1220", size=11, family="Inter"),
+        bgcolor=tag_color, borderpad=2, row=1, col=1,
+    )
 
     fig.update_layout(
-        height=560,
+        height=580,
         margin=dict(l=8, r=8, t=8, b=8),
         paper_bgcolor="rgba(0,0,0,0)",
         plot_bgcolor="rgba(0,0,0,0)",
@@ -245,32 +327,47 @@ def candle_figure(df: pd.DataFrame) -> go.Figure:
         xaxis_rangeslider_visible=False,
         dragmode=False,
         bargap=0.25,
+        legend=dict(
+            orientation="h", yanchor="top", y=0.99, xanchor="left", x=0.01,
+            bgcolor="rgba(19,28,48,0.65)", bordercolor="#23324f", borderwidth=1,
+            font=dict(size=11, color="#cdd8ee"),
+        ),
     )
-    fig.update_xaxes(gridcolor=GRID, zeroline=False, showgrid=True, tickformat="%H:%M")
+    fig.update_xaxes(gridcolor=GRID, zeroline=False, showgrid=True, tickformat="%H:%M", row=1, col=1)
+    fig.update_xaxes(gridcolor=GRID, zeroline=False, tickformat="%H:%M",
+                     title_text="time (UTC)", title_font=dict(size=11), row=2, col=1)
     fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", tickprefix="$", row=1, col=1)
-    fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", row=2, col=1)
+    fig.update_yaxes(gridcolor=GRID, zeroline=False, side="right", title_text="vol", row=2, col=1)
     return fig
 
 
 def render_chart(engine):
-    symbol = st.segmented_control(
-        "Symbol", SYMBOLS, default=SYMBOLS[0], key="symbol",
-        selection_mode="single", label_visibility="collapsed",
-    ) or SYMBOLS[0]
+    c1, c2 = st.columns([3, 2])
+    with c1:
+        symbol = st.segmented_control(
+            "Symbol", SYMBOLS, default=SYMBOLS[0], key="symbol",
+            selection_mode="single",
+        ) or SYMBOLS[0]
+    with c2:
+        tf_label = st.segmented_control(
+            "Range", list(TIMEFRAMES), default="1h", key="tf",
+            selection_mode="single",
+        ) or "1h"
 
-    df = candles_for(engine, symbol)
+    df = candles_for(engine, symbol, TIMEFRAMES[tf_label])
     if df.empty:
         st.info(f"No candles for {symbol} yet. They appear about 2 minutes after the job starts.")
         return
 
-    last = df.iloc[-1]
-    move = (float(last["close"]) - float(last["open"])) / float(last["open"]) * 100 if last["open"] else 0.0
+    first_open = float(df["open"].iloc[0])
+    last_close = float(df["close"].iloc[-1])
+    move = (last_close - first_open) / first_open * 100 if first_open else 0.0
     cls = "up" if move >= 0 else "down"
     st.markdown(
         f'<div class="tp-sub"><b style="color:#f8fafc;font-size:1rem">{symbol}</b> &nbsp; '
-        f'${float(last["close"]):,.2f} &nbsp; '
-        f'<span class="{cls}">{move:+.2f}% last candle</span> &nbsp;·&nbsp; '
-        f'{len(df)} candles</div>',
+        f'${last_close:,.2f} &nbsp; '
+        f'<span class="{cls}">{move:+.2f}% over {tf_label}</span> &nbsp;·&nbsp; '
+        f'{len(df)} candles · times UTC</div>',
         unsafe_allow_html=True,
     )
     st.plotly_chart(
@@ -280,7 +377,7 @@ def render_chart(engine):
 
 
 def render_alerts(engine):
-    st.markdown('<div class="tp-section">Recent volatility alerts</div>', unsafe_allow_html=True)
+    st.markdown('<div class="tp-section">Recent volatility alerts <span class="tp-sub">(times UTC)</span></div>', unsafe_allow_html=True)
     alerts = recent_alerts(engine)
     if alerts.empty:
         st.markdown('<div class="tp-sub">No alerts yet.</div>', unsafe_allow_html=True)
