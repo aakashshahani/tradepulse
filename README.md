@@ -4,255 +4,173 @@
 
 # TradePulse
 
-A real-time streaming data pipeline for crypto market data. The full flow is
-Coinbase WebSocket to Kafka to Spark structured streaming to Postgres to a
-Streamlit dashboard, built in phases.
+[![CI](https://github.com/aakashshahani/tradepulse/actions/workflows/ci.yml/badge.svg)](https://github.com/aakashshahani/tradepulse/actions/workflows/ci.yml)
+
+TradePulse is a real-time streaming data pipeline for crypto market data. It
+bridges Coinbase's public trade feed into Kafka, aggregates trades into
+1-minute OHLC candles and volatility alerts with Spark Structured Streaming,
+persists them to Postgres, and serves a live Streamlit dashboard. The whole
+stack runs from a single `docker compose up`.
 
 <p align="center">
   <img src="assets/dashboard.gif" alt="TradePulse dashboard" width="100%">
 </p>
 
-The dashboard: live candlestick + volume charts with MA and VWAP overlays, a KPI
-row with sparklines and pipeline health, and a volatility alerts feed. Read-only
-over Postgres, auto-refreshing every 10 seconds at `http://localhost:8501`.
+## Architecture
 
-## Status
-
-- **Phase 1: infrastructure and schema.** Kafka (KRaft) plus Postgres 18 via
-  Docker Compose, with the pipeline schema created on first Postgres startup.
-- **Phase 2: Coinbase bridge producer.** A Python service that republishes live
-  Coinbase trades onto Kafka.
-- **Phase 3: candle aggregation.** A PySpark Structured Streaming job that turns
-  `trades.raw` into 1-minute OHLC candles and writes them to Postgres.
-- **Phase 4: volatility alerts.** The same job flags candles whose open-to-close
-  move exceeds a threshold and writes them to the `alerts` table.
-- **Phase 5: dashboard.** A read-only Streamlit + Plotly dashboard with live
-  candlestick/volume charts, a KPI row, and an alerts feed. (current)
-
-## Project layout
-
+```mermaid
+flowchart LR
+    CB[Coinbase Exchange WS] -->|matches + heartbeat| P[producer<br/>async bridge]
+    P -->|JSON, keyed by symbol| K[(Kafka<br/>trades.raw · 6 partitions)]
+    K --> S[spark_job<br/>Structured Streaming]
+    S -->|1-min OHLC candles| PG[(Postgres)]
+    S -->|volatility alerts| PG
+    PG --> D[dashboard<br/>Streamlit + Plotly]
 ```
-tradepulse/
-├── docker-compose.yml   # kafka, kafka-init, postgres, producer
-├── .env.example         # copy to .env
-├── assets/
-│   └── banner.svg
-├── sql/
-│   └── init.sql         # schema loaded on first Postgres startup
-├── schemas/
-│   └── trades.raw.schema.json   # JSON Schema contract for the trades.raw topic
-├── producer/            # Phase 2: Coinbase to Kafka producer
-│   ├── producer.py
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── tests/           # unit tests (transform_match)
-├── spark_job/           # Phase 3: Spark structured streaming (candles)
-│   ├── streaming_job.py
-│   ├── requirements.txt
-│   ├── Dockerfile
-│   └── tests/           # unit tests (aggregate_candles OHLC + alerts logic)
-└── dashboard/           # Phase 5: Streamlit + Plotly dashboard
-    ├── app.py
-    ├── requirements.txt
-    ├── Dockerfile
-    └── .streamlit/config.toml
+
+- **producer** subscribes to Coinbase's `matches` and `heartbeat` channels and
+  republishes each trade to `trades.raw`, keyed by symbol (per-symbol ordering),
+  with an idempotent Kafka producer. Reconnects with exponential backoff.
+- **spark_job** parses `trades.raw` against an explicit schema, drops malformed
+  records, and computes per-symbol 1-minute candles with a watermark. Finalized
+  candles are written to `candles`; candles whose move exceeds a threshold also
+  write to `alerts`.
+- **dashboard** reads `candles`, `alerts`, and a metrics table (read-only) and
+  renders live charts, KPIs, and an alerts feed, auto-refreshing every 10s.
+
+## Quick start
+
+From a clean clone:
+
+```bash
+git clone https://github.com/aakashshahani/tradepulse
+cd tradepulse
+cp .env.example .env
+docker compose up -d --build
 ```
+
+Then open the dashboard at **http://localhost:8501**. The first 1-minute candles
+land about two minutes after startup (window length plus watermark); until then
+the dashboard shows a clear "waiting for data" state.
 
 ## Services
 
 | Service      | Image                | Purpose                                                        |
 |--------------|----------------------|----------------------------------------------------------------|
-| `kafka`      | `apache/kafka:4.3.1` | Single-node KRaft broker (broker and controller, no ZooKeeper).|
+| `kafka`      | `apache/kafka:4.3.1` | Single-node KRaft broker (broker + controller, no ZooKeeper).  |
 | `kafka-init` | `apache/kafka:4.3.1` | One-shot: creates `trades.raw` with 6 partitions, then exits.  |
 | `postgres`   | `postgres:18`        | Pipeline schema, persistent named volume.                      |
 | `producer`   | built locally        | Coinbase Exchange WS to `trades.raw`.                          |
-| `spark_job`  | built locally        | Structured Streaming: `trades.raw` to 1-minute candles in Postgres. |
+| `spark_job`  | built locally        | Structured Streaming: `trades.raw` to candles + alerts.        |
 | `dashboard`  | built locally        | Read-only Streamlit + Plotly UI on `http://localhost:8501`.    |
 
-### Kafka listeners (host vs. in-network)
+## Project layout
 
-The broker advertises two addresses because a single one cannot serve both
-paths. The address a client is told to reconnect on must be resolvable from
-that client.
+```
+tradepulse/
+├── docker-compose.yml
+├── .env.example
+├── assets/                 # banner, dashboard media
+├── sql/init.sql            # schema, loaded on first Postgres startup
+├── schemas/                # JSON Schema contract for trades.raw
+├── producer/               # Coinbase to Kafka bridge (+ tests)
+├── spark_job/              # Spark candle + alert job (+ tests)
+├── dashboard/              # Streamlit dashboard
+└── .github/workflows/ci.yml
+```
 
-- **In-network containers** use `kafka:9092` (the `INTERNAL` listener). This is
-  what the producer connects to.
-- **The host machine** uses `localhost:29092` (the `HOST` listener). Note the
-  port is 29092, not 9092.
+## Design decisions
 
-`docker compose exec kafka ...` runs inside the broker container, so it uses
-`localhost:9092`. That is fine and unaffected by the above.
+- **KRaft over ZooKeeper.** Kafka 4.x runs KRaft natively, so one process is
+  both broker and controller. There is no separate ZooKeeper ensemble to run,
+  secure, and monitor, which is fewer moving parts for a single-node stack (and
+  ZooKeeper is removed in Kafka 4 anyway).
+- **confluent-kafka over kafka-python.** confluent-kafka wraps librdkafka (C),
+  giving higher throughput and first-class idempotent-producer support
+  (`enable.idempotence`). kafka-python is pure Python, slower, and has lagged on
+  newer broker features.
+- **psycopg2 over Spark's JDBC writer for the sink.** Spark's built-in JDBC
+  writer only emits plain `INSERT`; it cannot express `ON CONFLICT`. The sink
+  needs an idempotent duplicate-skip on checkpoint replay, so it uses
+  `foreachBatch` + `psycopg2` `execute_values` with `ON CONFLICT DO NOTHING`. A
+  bonus is that a candle and its derived alert commit in one transaction.
+- **Watermark + append instead of upsert.** With a 1-minute watermark and
+  `append` output mode, Spark emits each window's candle exactly once, after the
+  window is provably final. That keeps the write a plain `INSERT` with no
+  read-modify-write upsert and no last-writer-wins races. The `ON CONFLICT DO
+  NOTHING` covers only the rare crash-between-write-and-checkpoint replay.
+- **Partition pre-creation.** `trades.raw` is created with 6 partitions by a
+  one-shot `kafka-init` service instead of relying on auto-creation (which makes
+  one partition). Keying by symbol preserves per-symbol ordering regardless, and
+  6 partitions leaves headroom for consumer parallelism.
 
-## Getting started
+## Scaling considerations
+
+- **Partition count and consumer parallelism.** A partition is Kafka's unit of
+  parallelism: within a consumer group, at most one consumer reads a given
+  partition. 6 partitions means up to 6 parallel readers for `trades.raw`. With
+  3 symbols keyed today only 3 partitions carry data, but the headroom is there
+  for more symbols or scaling out. Raising parallelism means raising partitions
+  (and repartitioning existing data if ordering must be preserved).
+- **local[*] to a real cluster.** The Spark job runs `master("local[*]")`
+  in-process. Moving to a cluster means pointing `master` at a standalone / YARN
+  / Kubernetes master, shipping the job and its Kafka connector (via `--packages`
+  or a bundled jar), sizing executors, and moving the checkpoint to shared
+  storage (HDFS/S3). The job logic does not change, only submission and config.
+- **Extended Coinbase disconnect.** The producer reconnects with jittered
+  exponential backoff (capped at 30s), so short outages self-heal. During a long
+  outage no trades flow, so no candles are produced; the dashboard's health card
+  moves to Lagging then Stale. When the feed returns, the producer resumes and
+  Spark continues from its checkpoint. Nothing is fabricated for the gap: candles
+  simply do not exist for those minutes, and the chart breaks the MA/VWAP lines
+  across the gap rather than interpolating.
+
+## Observability
+
+- **Healthchecks** on every service: producer and spark_job use a heartbeat file
+  (refreshed on each trade / each streaming-progress event) checked by a Docker
+  `HEALTHCHECK`; postgres uses `pg_isready`; kafka uses the broker API.
+- **Throughput logging** in the producer: per-symbol trades/sec roughly every
+  10s, so liveness is visible without a consumer.
+- **Malformed-record metric.** The Spark job counts records that fail parsing,
+  logs them per batch, and accumulates the total in a `pipeline_metrics` table.
+  The dashboard surfaces that count on the pipeline-health card.
+- The alerts panel shows the **actual configured threshold**, and the chart's
+  MA/VWAP overlays are null across data gaps rather than interpolating, so the UI
+  never implies data it does not have.
+
+## Testing
 
 ```bash
-cp .env.example .env     # adjust POSTGRES_PASSWORD etc. if you like
-docker compose up -d --build
-docker compose ps        # kafka/postgres healthy, kafka-init exited 0, producer up
+# producer
+cd producer && pip install -r requirements.txt pytest && python -m pytest -q
+
+# spark_job (needs a JDK 17)
+cd spark_job && pip install -r requirements.txt && python -m pytest -q
 ```
 
-Then open the dashboard at **http://localhost:8501**. Candles start filling in
-about two minutes after startup (1-minute window plus watermark); until then the
-dashboard shows a clear "waiting for data" state. The page auto-refreshes every
-10 seconds via `st.fragment(run_every="10s")`, no manual reload needed.
+Coverage: `transform_match` (producer); OHLC picking and the `(ts, trade_id)`
+tie-break, `pct_change` and the alert threshold boundary, and the malformed-row
+filter (spark_job). CI (GitHub Actions) runs `ruff` plus both suites on every
+push and PR.
 
-## Verifying Phase 3 (candles)
+## Future work
 
-The Spark job reads `trades.raw` from the latest offset, computes 1-minute OHLC
-candles per symbol, and writes each finalized window to the `candles` table. It
-uses a 1-minute watermark, so the first candle for a window lands roughly two to
-three minutes after startup (window length plus watermark).
+Deferred deliberately, not missing:
 
-Watch it write candles:
-
-```bash
-docker compose logs -f spark_job     # look for "wrote N candle(s) to postgres"
-```
-
-Query the candles once a couple of minutes have passed:
-
-```bash
-docker compose exec postgres psql -U tradepulse -d tradepulse -c \
-  "SELECT symbol, window_start, window_end, open, high, low, close, round(volume,4) AS volume
-     FROM candles ORDER BY window_start DESC, symbol LIMIT 12;"
-```
-
-How OHLC is computed: `open` and `close` are the prices of the earliest and
-latest trade in the window, ordered by `(ts, trade_id)`; `high`/`low`/`volume`
-are `max`/`min`/`sum`. This runs as a windowed aggregation in the streaming
-query so each candle is complete before it is written, and `foreachBatch` is the
-JDBC sink (append/INSERT). Malformed records are dropped and counted per batch
-(grep the logs for `dropped`).
-
-Run the OHLC unit tests:
-
-```bash
-docker compose run --rm --no-deps -v "$PWD/spark_job:/app" -w /app \
-  --entrypoint python spark_job -m pytest -q
-```
-
-## Verifying Phase 4 (alerts)
-
-In the same `foreachBatch` sink, each finalized candle's move is computed as
-`pct_change = (close - open) / open * 100`. If `abs(pct_change)` exceeds
-`ALERT_THRESHOLD_PCT` (default `0.3`), an `alerts` row is written with the close
-price and a message like `BTC-USD moved +0.42% in the 14:32-14:33 window`.
-
-Both the candle and alert inserts use `ON CONFLICT DO NOTHING` (keyed on
-`(symbol, window_start)` and `(symbol, ts)`), so a checkpoint-recovery replay is
-a safe no-op rather than a duplicate-key error.
-
-> The default `0.3` is demo-tuned so alerts are visibly firing, not a value
-> calibrated against real volatility. Set `ALERT_THRESHOLD_PCT` for your data.
-
-Lower the threshold to see alerts quickly (crypto rarely moves 0.3% in a single
-minute):
-
-```bash
-echo "ALERT_THRESHOLD_PCT=0.02" >> .env
-docker compose up -d spark_job
-
-docker compose exec postgres psql -U tradepulse -d tradepulse -c \
-  "SELECT symbol, ts, round(pct_change,3) AS pct, message FROM alerts ORDER BY ts DESC LIMIT 10;"
-```
-
-## Verifying Phase 2 (producer)
-
-Watch the producer bridge live trades onto Kafka:
-
-```bash
-docker compose logs -f producer
-```
-
-You should see `connected`, `subscription confirmed`, and a throughput line
-roughly every 10s, for example:
-
-```
-throughput (10s window): BTC-USD=5.49/s ETH-USD=9.88/s SOL-USD=1.50/s | total=16.87/s
-```
-
-Confirm `trades.raw` has 6 partitions:
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --describe --topic trades.raw
-```
-
-Consume a few real messages (keyed by symbol):
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic trades.raw \
-  --property print.key=true --property key.separator=' | ' \
-  --from-beginning --max-messages 5 --timeout-ms 15000
-```
-
-Each value matches `schemas/trades.raw.schema.json`, for example:
-
-```json
-{"symbol":"BTC-USD","price":58699.73,"size":8e-08,"side":"buy","trade_id":1047769595,"ts":"2026-07-01T10:12:39.996920Z"}
-```
-
-Check the producer's health. It refreshes a heartbeat file on every message from
-the feed and goes `unhealthy` if the feed stalls:
-
-```bash
-docker compose ps producer      # STATUS shows (healthy)
-```
-
-### Running the producer unit tests
-
-Tests are not shipped in the runtime image. Run them in the producer image with
-the source mounted:
-
-```bash
-docker compose run --rm --no-deps -v "$PWD/producer:/app" -w /app \
-  --entrypoint python producer -m unittest discover -t . -s tests -p 'test_*.py'
-```
-
-## Verifying Phase 1 (infra and schema)
-
-### Kafka: produce and consume a test topic
-
-```bash
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 \
-  --create --topic test --partitions 1 --replication-factor 1
-
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --list
-
-docker compose exec -it kafka /opt/kafka/bin/kafka-console-producer.sh \
-  --bootstrap-server localhost:9092 --topic test        # type lines, Ctrl-C
-
-docker compose exec kafka /opt/kafka/bin/kafka-console-consumer.sh \
-  --bootstrap-server localhost:9092 --topic test --from-beginning --timeout-ms 5000
-
-docker compose exec kafka /opt/kafka/bin/kafka-topics.sh \
-  --bootstrap-server localhost:9092 --delete --topic test
-```
-
-### Postgres: confirm the three tables exist
-
-```bash
-docker compose exec postgres psql -U tradepulse -d tradepulse -c "\dt"
-docker compose exec postgres psql -U tradepulse -d tradepulse -c "\d candles"
-```
-
-You should see `candles`, `alerts`, and `raw_trades`.
-
-> If you changed `POSTGRES_USER` or `POSTGRES_DB` in `.env`, substitute them above.
+- **Dead-letter queue.** Malformed records are currently counted and dropped; a
+  `trades.dlq` topic would retain them for inspection and replay.
+- **Sub-second raw-trade ticker.** Have the producer also write to `raw_trades`
+  so the dashboard can show a live price between 1-minute candle closes.
+- **Schema Registry + Avro.** Replace the JSON Schema contract in `schemas/` with
+  a registry-enforced schema for producer/consumer compatibility guarantees.
 
 ## Tearing down
 
 ```bash
-docker compose down          # stop containers, keep data volume
-docker compose down -v       # also remove the Postgres volume (wipes data and
-                             # re-runs init.sql on next startup)
+docker compose down          # stop containers, keep the Postgres volume
+docker compose down -v       # also remove volumes (wipes data, re-runs init.sql)
 ```
 
-> `sql/init.sql` runs only when the Postgres data volume is empty. If you change
-> the schema, run `docker compose down -v` to re-initialize.
->
-> Kafka has no persistent volume, so `trades.raw` is recreated by `kafka-init`
-> on each `up`.
+> `sql/init.sql` runs only when the Postgres data volume is empty. Kafka has no
+> persistent volume, so `trades.raw` is recreated by `kafka-init` on each `up`.
