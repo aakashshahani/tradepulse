@@ -151,6 +151,10 @@ tradepulse/
 
 ### Metrics (Prometheus + Grafana)
 
+<p align="center">
+  <img src="assets/grafana.png" alt="TradePulse Grafana dashboard" width="100%">
+</p>
+
 Prometheus scrapes three targets: the producer (`/metrics`, trades/sec per
 symbol), the Spark driver (`/metrics`, per-query processing rate and micro-batch
 duration from streaming progress), and a `kafka-exporter` (topic offsets). A
