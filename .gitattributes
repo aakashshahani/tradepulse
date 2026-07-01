@@ -1,0 +1,7 @@
+# Normalize line endings to LF in the repo. These files run inside Linux
+# containers, so CRLF would break shell scripts / confuse tooling.
+* text=auto eol=lf
+
+# Explicit binary types (add as needed).
+*.png binary
+*.jpg binary
