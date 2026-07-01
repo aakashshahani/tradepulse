@@ -8,6 +8,14 @@ A real-time streaming data pipeline for crypto market data. The full flow is
 Coinbase WebSocket to Kafka to Spark structured streaming to Postgres to a
 Streamlit dashboard, built in phases.
 
+<p align="center">
+  <img src="assets/dashboard.png" alt="TradePulse dashboard" width="100%">
+</p>
+
+The dashboard: live candlestick + volume charts with MA and VWAP overlays, a KPI
+row with sparklines and pipeline health, and a volatility alerts feed. Read-only
+over Postgres, auto-refreshing every 10 seconds at `http://localhost:8501`.
+
 ## Status
 
 - **Phase 1: infrastructure and schema.** Kafka (KRaft) plus Postgres 18 via
