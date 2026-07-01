@@ -31,3 +31,6 @@ data/
 *.swp
 .DS_Store
 Thumbs.db
+
+# --- Personal / local only (not part of the project) ---
+docs/STUDY_GUIDE.md
