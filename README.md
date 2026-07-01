@@ -140,12 +140,32 @@ tradepulse/
   `HEALTHCHECK`; postgres uses `pg_isready`; kafka uses the broker API.
 - **Throughput logging** in the producer: per-symbol trades/sec roughly every
   10s, so liveness is visible without a consumer.
-- **Malformed-record metric.** The Spark job counts records that fail parsing,
-  logs them per batch, and accumulates the total in a `pipeline_metrics` table.
-  The dashboard surfaces that count on the pipeline-health card.
+- **Malformed-record handling.** Records that fail parsing are counted per batch,
+  accumulated in a `pipeline_metrics` table (surfaced on the dashboard), and
+  republished with their original payload to a `trades.dlq` dead-letter topic for
+  inspection or replay, rather than being silently dropped.
 - The alerts panel shows the **actual configured threshold**, and the chart's
   MA/VWAP overlays are null across data gaps rather than interpolating, so the UI
   never implies data it does not have.
+
+## Fault tolerance
+
+The pipeline recovers from a mid-stream crash with no lost or duplicated candles.
+Spark Structured Streaming checkpoints its Kafka offsets and window state to a
+persistent volume, so on restart it resumes from the last committed batch instead
+of reprocessing from scratch. The sink's `ON CONFLICT DO NOTHING` covers the one
+window that may be replayed if the process dies between the write and the
+checkpoint commit. The producer independently reconnects to Coinbase with
+jittered exponential backoff.
+
+You can watch this happen:
+
+```bash
+bash scripts/demo_recovery.sh
+```
+
+It records the candle count, kills `spark_job` mid-stream, restarts it, and shows
+candles continuing with zero duplicates.
 
 ## Testing
 
@@ -168,8 +188,6 @@ on every push and PR.
 
 Deferred deliberately, not missing:
 
-- **Dead-letter queue.** Malformed records are currently counted and dropped; a
-  `trades.dlq` topic would retain them for inspection and replay.
 - **Sub-second raw-trade ticker.** Have the producer also write to `raw_trades`
   so the dashboard can show a live price between 1-minute candle closes.
 - **Schema Registry + Avro.** Replace the JSON Schema contract in `schemas/` with

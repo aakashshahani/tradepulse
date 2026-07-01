@@ -98,8 +98,6 @@ are the difference between a chart that informs and a chart that misleads.
 
 Deferred deliberately, not missing:
 
-- **Dead-letter queue.** Malformed records are counted and dropped today; a
-  `trades.dlq` topic would retain them for inspection and replay.
 - **Sub-second raw-trade ticker.** Persist individual trades to `raw_trades` so
   the dashboard can show a live price between candle closes.
 - **Schema Registry.** Replace the JSON Schema contract with a registry-enforced
