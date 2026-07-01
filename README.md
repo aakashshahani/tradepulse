@@ -71,6 +71,7 @@ A longer walkthrough of the architecture and the design tradeoffs is in
 | `producer`   | built locally        | Coinbase Exchange WS to `trades.raw`.                          |
 | `spark_job`  | built locally        | Structured Streaming: `trades.raw` to candles + alerts.        |
 | `dashboard`  | built locally        | Read-only Streamlit + Plotly UI on `http://localhost:8501`.    |
+| `prometheus` / `grafana` / `kafka-exporter` | pinned | Metrics scraping + dashboards on `http://localhost:3000`.      |
 
 ## Project layout
 
@@ -147,6 +148,21 @@ tradepulse/
 - The alerts panel shows the **actual configured threshold**, and the chart's
   MA/VWAP overlays are null across data gaps rather than interpolating, so the UI
   never implies data it does not have.
+
+### Metrics (Prometheus + Grafana)
+
+Prometheus scrapes three targets: the producer (`/metrics`, trades/sec per
+symbol), the Spark driver (`/metrics`, per-query processing rate and micro-batch
+duration from streaming progress), and a `kafka-exporter` (topic offsets). A
+provisioned Grafana dashboard visualizes them at **http://localhost:3000**
+(anonymous viewer enabled, so no login) and Prometheus is at
+**http://localhost:9090**.
+
+Panels: producer throughput, Spark processing rate, Spark micro-batch duration
+(the latency proxy), and `trades.raw` ingestion rate. Note the ingestion rate
+rather than consumer-group lag: Spark Structured Streaming tracks Kafka offsets
+in its own checkpoint, not via Kafka consumer-group commits, so classic
+consumer-group lag does not apply here.
 
 ## Fault tolerance
 

@@ -102,8 +102,6 @@ Deferred deliberately, not missing:
   the dashboard can show a live price between candle closes.
 - **Schema Registry.** Replace the JSON Schema contract with a registry-enforced
   schema for real producer/consumer compatibility guarantees.
-- **Ops monitoring.** Prometheus + Grafana for consumer lag, throughput, and
-  candle latency.
 
 ## Running it
 
