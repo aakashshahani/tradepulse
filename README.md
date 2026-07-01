@@ -13,9 +13,11 @@ Streamlit dashboard, built in phases.
 - **Phase 1: infrastructure and schema.** Kafka (KRaft) plus Postgres 18 via
   Docker Compose, with the pipeline schema created on first Postgres startup.
 - **Phase 2: Coinbase bridge producer.** A Python service that republishes live
-  Coinbase trades onto Kafka. (current)
+  Coinbase trades onto Kafka.
+- **Phase 3: candle aggregation.** A PySpark Structured Streaming job that turns
+  `trades.raw` into 1-minute OHLC candles and writes them to Postgres. (current)
 
-The Spark job and Streamlit dashboard are later phases and are not built yet.
+Alert derivation and the Streamlit dashboard are later phases, not built yet.
 
 ## Project layout
 
@@ -34,7 +36,11 @@ tradepulse/
 │   ├── requirements.txt
 │   ├── Dockerfile
 │   └── tests/           # unit tests (transform_match)
-├── spark_job/           # Phase 3+: Spark structured streaming (placeholder)
+├── spark_job/           # Phase 3: Spark structured streaming (candles)
+│   ├── streaming_job.py
+│   ├── requirements.txt
+│   ├── Dockerfile
+│   └── tests/           # unit tests (aggregate_candles OHLC logic)
 └── dashboard/           # Phase 5+: Streamlit dashboard (placeholder)
 ```
 
@@ -46,6 +52,7 @@ tradepulse/
 | `kafka-init` | `apache/kafka:4.3.1` | One-shot: creates `trades.raw` with 6 partitions, then exits.  |
 | `postgres`   | `postgres:18`        | Pipeline schema, persistent named volume.                      |
 | `producer`   | built locally        | Coinbase Exchange WS to `trades.raw`.                          |
+| `spark_job`  | built locally        | Structured Streaming: `trades.raw` to 1-minute candles in Postgres. |
 
 ### Kafka listeners (host vs. in-network)
 
@@ -67,6 +74,41 @@ that client.
 cp .env.example .env     # adjust POSTGRES_PASSWORD etc. if you like
 docker compose up -d --build
 docker compose ps        # kafka/postgres healthy, kafka-init exited 0, producer up
+```
+
+## Verifying Phase 3 (candles)
+
+The Spark job reads `trades.raw` from the latest offset, computes 1-minute OHLC
+candles per symbol, and writes each finalized window to the `candles` table. It
+uses a 1-minute watermark, so the first candle for a window lands roughly two to
+three minutes after startup (window length plus watermark).
+
+Watch it write candles:
+
+```bash
+docker compose logs -f spark_job     # look for "wrote N candle(s) to postgres"
+```
+
+Query the candles once a couple of minutes have passed:
+
+```bash
+docker compose exec postgres psql -U tradepulse -d tradepulse -c \
+  "SELECT symbol, window_start, window_end, open, high, low, close, round(volume,4) AS volume
+     FROM candles ORDER BY window_start DESC, symbol LIMIT 12;"
+```
+
+How OHLC is computed: `open` and `close` are the prices of the earliest and
+latest trade in the window, ordered by `(ts, trade_id)`; `high`/`low`/`volume`
+are `max`/`min`/`sum`. This runs as a windowed aggregation in the streaming
+query so each candle is complete before it is written, and `foreachBatch` is the
+JDBC sink (append/INSERT). Malformed records are dropped and counted per batch
+(grep the logs for `dropped`).
+
+Run the OHLC unit tests:
+
+```bash
+docker compose run --rm --no-deps -v "$PWD/spark_job:/app" -w /app \
+  --entrypoint python spark_job -m pytest -q
 ```
 
 ## Verifying Phase 2 (producer)

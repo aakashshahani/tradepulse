@@ -1,0 +1,32 @@
+# Spark 4.x requires Java 17+. temurin gives us a JRE with JAVA_HOME set.
+FROM eclipse-temurin:17-jre-jammy
+
+ENV PYTHONUNBUFFERED=1 \
+    SPARK_IVY_DIR=/opt/.ivy2 \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:$PATH
+
+# Python + procps (Spark shells out to `ps`).
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends python3 python3-venv procps \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv "$VIRTUAL_ENV"
+
+WORKDIR /app
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+COPY streaming_job.py .
+
+# Warm the Ivy cache so the Kafka connector + Postgres JDBC jars are baked into
+# the image (fast, offline-capable startup instead of resolving from Maven on
+# every container start).
+ENV SPARK_PACKAGES="org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2,org.postgresql:postgresql:42.7.7"
+RUN python -c "from pyspark.sql import SparkSession; import os; \
+SparkSession.builder.master('local[1]') \
+  .config('spark.jars.packages', os.environ['SPARK_PACKAGES']) \
+  .config('spark.jars.ivy', os.environ['SPARK_IVY_DIR']) \
+  .getOrCreate().stop()"
+
+CMD ["python", "streaming_job.py"]
