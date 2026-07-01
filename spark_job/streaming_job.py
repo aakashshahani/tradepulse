@@ -56,6 +56,9 @@ log = logging.getLogger("tradepulse.spark")
 
 KAFKA_BOOTSTRAP_SERVERS = os.getenv("KAFKA_BOOTSTRAP_SERVERS", "localhost:29092")
 KAFKA_TOPIC = os.getenv("KAFKA_TOPIC", "trades.raw")
+# Dead-letter topic: original payloads that fail parsing are republished here for
+# inspection/replay instead of being silently dropped.
+DLQ_TOPIC = os.getenv("DLQ_TOPIC", "trades.dlq")
 
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "localhost")
 POSTGRES_PORT = os.getenv("POSTGRES_PORT", "5432")
@@ -147,9 +150,9 @@ def parse_trades(raw_df: DataFrame) -> DataFrame:
     """Kafka value -> typed trade columns (ts as timestamp). Bad JSON or bad
     fields surface as nulls, which the caller filters on."""
     return (
-        raw_df.select(F.col("value").cast("string").alias("json"))
-        .select(F.from_json("json", TRADE_SCHEMA).alias("d"))
-        .select("d.*")
+        raw_df.select(F.col("value").cast("string").alias("raw_json"))
+        .withColumn("d", F.from_json("raw_json", TRADE_SCHEMA))
+        .select("raw_json", "d.*")
         .withColumn("ts", F.to_timestamp("ts"))
     )
 
@@ -338,10 +341,25 @@ def make_malformed_logger():
     pipeline_metrics counter the dashboard reads."""
 
     def _log(batch_df: DataFrame, batch_id: int) -> None:
+        batch_df = batch_df.persist()
         dropped = batch_df.count()
         if dropped == 0:
+            batch_df.unpersist()
             return
         log.warning("batch %s: dropped %d malformed record(s)", batch_id, dropped)
+
+        # Dead-letter the original payloads to trades.dlq for inspection/replay.
+        try:
+            (
+                batch_df.selectExpr("CAST(NULL AS STRING) AS key", "raw_json AS value")
+                .write.format("kafka")
+                .option("kafka.bootstrap.servers", KAFKA_BOOTSTRAP_SERVERS)
+                .option("topic", DLQ_TOPIC)
+                .save()
+            )
+        except Exception as exc:  # noqa: BLE001
+            log.warning("batch %s: could not write to DLQ: %s", batch_id, exc)
+
         # A metrics-write failure must not take down the pipeline.
         try:
             conn = _pg_connect()
@@ -353,6 +371,8 @@ def make_malformed_logger():
                 conn.close()
         except Exception as exc:  # noqa: BLE001
             log.warning("batch %s: could not update malformed metric: %s", batch_id, exc)
+
+        batch_df.unpersist()
 
     return _log
 

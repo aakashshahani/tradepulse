@@ -78,6 +78,9 @@ services:
           --create --if-not-exists --topic trades.raw \
           --partitions 6 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
+          --create --if-not-exists --topic trades.dlq \
+          --partitions 3 --replication-factor 1
+        /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
           --describe --topic trades.raw
 
   producer:
@@ -113,6 +116,7 @@ services:
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:9092
       KAFKA_TOPIC: ${KAFKA_TOPIC:-trades.raw}
+      DLQ_TOPIC: ${DLQ_TOPIC:-trades.dlq}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ${POSTGRES_DB}
