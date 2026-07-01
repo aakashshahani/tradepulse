@@ -5,6 +5,8 @@
 # TradePulse
 
 [![CI](https://github.com/aakashshahani/tradepulse/actions/workflows/ci.yml/badge.svg)](https://github.com/aakashshahani/tradepulse/actions/workflows/ci.yml)
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/aakashshahani/tradepulse)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 TradePulse is a real-time streaming data pipeline for crypto market data. It
 bridges Coinbase's public trade feed into Kafka, aggregates trades into
@@ -52,6 +54,12 @@ docker compose up -d --build
 Then open the dashboard at **http://localhost:8501**. The first 1-minute candles
 land about two minutes after startup (window length plus watermark); until then
 the dashboard shows a clear "waiting for data" state.
+
+No local Docker? Click **Open in GitHub Codespaces** above to build and run the
+whole stack in the cloud, with the dashboard port forwarded automatically.
+
+A longer walkthrough of the architecture and the design tradeoffs is in
+[docs/architecture.md](docs/architecture.md).
 
 ## Services
 
@@ -151,8 +159,10 @@ cd spark_job && pip install -r requirements.txt && python -m pytest -q
 
 Coverage: `transform_match` (producer); OHLC picking and the `(ts, trade_id)`
 tie-break, `pct_change` and the alert threshold boundary, and the malformed-row
-filter (spark_job). CI (GitHub Actions) runs `ruff` plus both suites on every
-push and PR.
+filter (spark_job). An integration test spins up Postgres with testcontainers
+and runs the real sink end to end, asserting candles + alerts land and that a
+replayed batch is idempotent. CI (GitHub Actions) runs `ruff` plus both suites
+on every push and PR.
 
 ## Future work
 
