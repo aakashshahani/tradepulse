@@ -1,0 +1,42 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tradepulse/schemas/trades.raw.schema.json",
+  "title": "trades.raw",
+  "description": "One executed trade republished from the Coinbase Exchange `matches` channel onto the Kafka topic `trades.raw`. Kafka message key is the `symbol` string (UTF-8), which preserves per-symbol ordering across partitions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["symbol", "price", "size", "side", "trade_id", "ts"],
+  "properties": {
+    "symbol": {
+      "type": "string",
+      "description": "Coinbase product id, e.g. BTC-USD. Also the Kafka message key.",
+      "examples": ["BTC-USD", "ETH-USD", "SOL-USD"]
+    },
+    "price": {
+      "type": "number",
+      "description": "Trade price in quote currency.",
+      "exclusiveMinimum": 0
+    },
+    "size": {
+      "type": "number",
+      "description": "Trade size in base currency. May be very small (scientific notation in JSON, e.g. 8e-08).",
+      "exclusiveMinimum": 0
+    },
+    "side": {
+      "type": "string",
+      "description": "Side of the resting (maker) order that was matched, per Coinbase.",
+      "enum": ["buy", "sell"]
+    },
+    "trade_id": {
+      "type": "integer",
+      "description": "Coinbase trade id, monotonically increasing per product.",
+      "minimum": 0
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Exchange trade execution time, ISO 8601 / RFC 3339 (UTC, 'Z').",
+      "examples": ["2026-07-01T10:12:39.996920Z"]
+    }
+  }
+}
