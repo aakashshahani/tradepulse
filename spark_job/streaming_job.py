@@ -29,8 +29,11 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import timezone
 from functools import reduce
 
+import psycopg2
+from psycopg2.extras import execute_values
 from pyspark.sql import DataFrame, SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import (
@@ -64,11 +67,12 @@ WATERMARK_DELAY = os.getenv("WATERMARK_DELAY", "1 minute")
 
 SPARK_PACKAGES = os.getenv(
     "SPARK_PACKAGES",
-    "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2,org.postgresql:postgresql:42.7.7",
+    "org.apache.spark:spark-sql-kafka-0-10_2.13:4.1.2",
 )
 SPARK_IVY_DIR = os.getenv("SPARK_IVY_DIR", "/opt/.ivy2")
 
-JDBC_URL = f"jdbc:postgresql://{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+# A finalized candle whose |open->close| move exceeds this percent raises an alert.
+ALERT_THRESHOLD_PCT = float(os.getenv("ALERT_THRESHOLD_PCT", "0.3"))
 
 # Explicit schema for the trades.raw JSON value. Mirrors
 # schemas/trades.raw.schema.json. No schema inference.
@@ -157,31 +161,133 @@ def aggregate_candles(
     )
 
 
-def make_candle_writer():
-    """foreachBatch sink: plain INSERT of finalized candles into Postgres.
+def pct_change(open_price: float, close_price: float) -> float:
+    """Percent change from open to close. 0.42 means +0.42%."""
+    if not open_price:
+        return 0.0
+    return (close_price - open_price) / open_price * 100.0
 
-    Append semantics mean each window is emitted once, so no upsert is needed.
-    (Caveat: if the process dies between the JDBC write and the checkpoint
-    commit, a replay could retry the insert; the candles UNIQUE(symbol,
-    window_start, window_end) constraint would then reject the duplicate. Fine
-    for this phase.)
+
+def build_alert(
+    symbol: str,
+    window_start,
+    window_end,
+    open_price: float,
+    close_price: float,
+    threshold: float,
+):
+    """Return an alert dict if abs(pct_change) exceeds threshold, else None.
+
+    Pure and batch-testable. ts is the window_end, price is the close.
+    """
+    pct = pct_change(open_price, close_price)
+    if abs(pct) <= threshold:
+        return None
+    message = (
+        f"{symbol} moved {pct:+.2f}% in the "
+        f"{window_start:%H:%M}-{window_end:%H:%M} window"
+    )
+    return {
+        "symbol": symbol,
+        "ts": window_end,
+        "price": close_price,
+        "pct_change": pct,
+        "message": message,
+    }
+
+
+def _pg_connect():
+    return psycopg2.connect(
+        host=POSTGRES_HOST,
+        port=POSTGRES_PORT,
+        dbname=POSTGRES_DB,
+        user=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+    )
+
+
+def _utc(dt):
+    """Spark hands back naive UTC datetimes; make them tz-aware for Postgres."""
+    if dt is not None and dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
+CANDLE_INSERT = (
+    "INSERT INTO candles "
+    "(symbol, window_start, window_end, open, high, low, close, volume) "
+    "VALUES %s ON CONFLICT (symbol, window_start) DO NOTHING"
+)
+# alerts.ts holds the window_end, so idempotency is keyed on (symbol, ts).
+ALERT_INSERT = (
+    "INSERT INTO alerts (symbol, ts, price, pct_change, message) "
+    "VALUES %s ON CONFLICT (symbol, ts) DO NOTHING"
+)
+
+
+def make_sink(threshold: float):
+    """foreachBatch sink: write finalized candles and derive volatility alerts.
+
+    Both inserts use ON CONFLICT DO NOTHING, so a checkpoint-recovery replay of a
+    batch is a safe no-op: no duplicate rows and no UPDATE.
     """
 
     def _write(batch_df: DataFrame, batch_id: int) -> None:
-        count = batch_df.count()
-        if count == 0:
+        rows = batch_df.collect()
+        if not rows:
             return
-        (
-            batch_df.write.format("jdbc")
-            .option("url", JDBC_URL)
-            .option("dbtable", "candles")
-            .option("user", POSTGRES_USER)
-            .option("password", POSTGRES_PASSWORD)
-            .option("driver", "org.postgresql.Driver")
-            .mode("append")
-            .save()
+
+        candles = [
+            (
+                r["symbol"],
+                _utc(r["window_start"]),
+                _utc(r["window_end"]),
+                r["open"],
+                r["high"],
+                r["low"],
+                r["close"],
+                r["volume"],
+            )
+            for r in rows
+        ]
+
+        alerts = []
+        for r in rows:
+            alert = build_alert(
+                r["symbol"],
+                r["window_start"],
+                r["window_end"],
+                r["open"],
+                r["close"],
+                threshold,
+            )
+            if alert is not None:
+                alerts.append(
+                    (
+                        alert["symbol"],
+                        _utc(alert["ts"]),
+                        alert["price"],
+                        alert["pct_change"],
+                        alert["message"],
+                    )
+                )
+
+        conn = _pg_connect()
+        try:
+            with conn:
+                with conn.cursor() as cur:
+                    execute_values(cur, CANDLE_INSERT, candles)
+                    if alerts:
+                        execute_values(cur, ALERT_INSERT, alerts)
+        finally:
+            conn.close()
+
+        log.info(
+            "batch %s: %d candle(s), %d alert(s)",
+            batch_id,
+            len(candles),
+            len(alerts),
         )
-        log.info("batch %s: wrote %d candle(s) to postgres", batch_id, count)
 
     return _write
 
@@ -215,7 +321,7 @@ def main() -> None:
 
     candle_query = (
         candles.writeStream.outputMode("append")
-        .foreachBatch(make_candle_writer())
+        .foreachBatch(make_sink(ALERT_THRESHOLD_PCT))
         .option("checkpointLocation", os.path.join(CHECKPOINT_DIR, "candles"))
         .start()
     )

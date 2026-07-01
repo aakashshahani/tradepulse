@@ -119,6 +119,7 @@ services:
       POSTGRES_USER: ${POSTGRES_USER}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       CHECKPOINT_DIR: /opt/spark_checkpoints
+      ALERT_THRESHOLD_PCT: ${ALERT_THRESHOLD_PCT:-0.3}
     volumes:
       # Persist streaming checkpoints so the job resumes after a restart.
       - spark_checkpoints:/opt/spark_checkpoints

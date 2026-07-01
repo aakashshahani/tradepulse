@@ -13,7 +13,9 @@ CREATE TABLE IF NOT EXISTS candles (
     low          NUMERIC(20, 8) NOT NULL,
     close        NUMERIC(20, 8) NOT NULL,
     volume       NUMERIC(30, 8) NOT NULL,
-    UNIQUE (symbol, window_start, window_end)
+    -- One candle per symbol per window. window_end is derived from
+    -- window_start, so this is the natural key and the ON CONFLICT target.
+    UNIQUE (symbol, window_start)
 );
 
 CREATE INDEX IF NOT EXISTS idx_candles_symbol_window
@@ -26,7 +28,10 @@ CREATE TABLE IF NOT EXISTS alerts (
     ts         TIMESTAMPTZ    NOT NULL,
     price      NUMERIC(20, 8) NOT NULL,
     pct_change NUMERIC(10, 4) NOT NULL,
-    message    TEXT           NOT NULL
+    message    TEXT           NOT NULL,
+    -- ts is the candle's window_end, so one alert per symbol per window.
+    -- This is the ON CONFLICT target for idempotent replay.
+    UNIQUE (symbol, ts)
 );
 
 CREATE INDEX IF NOT EXISTS idx_alerts_symbol_ts

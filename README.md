@@ -15,9 +15,11 @@ Streamlit dashboard, built in phases.
 - **Phase 2: Coinbase bridge producer.** A Python service that republishes live
   Coinbase trades onto Kafka.
 - **Phase 3: candle aggregation.** A PySpark Structured Streaming job that turns
-  `trades.raw` into 1-minute OHLC candles and writes them to Postgres. (current)
+  `trades.raw` into 1-minute OHLC candles and writes them to Postgres.
+- **Phase 4: volatility alerts.** The same job flags candles whose open-to-close
+  move exceeds a threshold and writes them to the `alerts` table. (current)
 
-Alert derivation and the Streamlit dashboard are later phases, not built yet.
+The Streamlit dashboard is a later phase, not built yet.
 
 ## Project layout
 
@@ -109,6 +111,28 @@ Run the OHLC unit tests:
 ```bash
 docker compose run --rm --no-deps -v "$PWD/spark_job:/app" -w /app \
   --entrypoint python spark_job -m pytest -q
+```
+
+## Verifying Phase 4 (alerts)
+
+In the same `foreachBatch` sink, each finalized candle's move is computed as
+`pct_change = (close - open) / open * 100`. If `abs(pct_change)` exceeds
+`ALERT_THRESHOLD_PCT` (default `0.3`), an `alerts` row is written with the close
+price and a message like `BTC-USD moved +0.42% in the 14:32-14:33 window`.
+
+Both the candle and alert inserts use `ON CONFLICT DO NOTHING` (keyed on
+`(symbol, window_start)` and `(symbol, ts)`), so a checkpoint-recovery replay is
+a safe no-op rather than a duplicate-key error.
+
+Lower the threshold to see alerts quickly (crypto rarely moves 0.3% in a single
+minute):
+
+```bash
+echo "ALERT_THRESHOLD_PCT=0.02" >> .env
+docker compose up -d spark_job
+
+docker compose exec postgres psql -U tradepulse -d tradepulse -c \
+  "SELECT symbol, ts, round(pct_change,3) AS pct, message FROM alerts ORDER BY ts DESC LIMIT 10;"
 ```
 
 ## Verifying Phase 2 (producer)
