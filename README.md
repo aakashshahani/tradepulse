@@ -17,9 +17,9 @@ Streamlit dashboard, built in phases.
 - **Phase 3: candle aggregation.** A PySpark Structured Streaming job that turns
   `trades.raw` into 1-minute OHLC candles and writes them to Postgres.
 - **Phase 4: volatility alerts.** The same job flags candles whose open-to-close
-  move exceeds a threshold and writes them to the `alerts` table. (current)
-
-The Streamlit dashboard is a later phase, not built yet.
+  move exceeds a threshold and writes them to the `alerts` table.
+- **Phase 5: dashboard.** A read-only Streamlit + Plotly dashboard with live
+  candlestick/volume charts, a KPI row, and an alerts feed. (current)
 
 ## Project layout
 
@@ -42,8 +42,12 @@ tradepulse/
 │   ├── streaming_job.py
 │   ├── requirements.txt
 │   ├── Dockerfile
-│   └── tests/           # unit tests (aggregate_candles OHLC logic)
-└── dashboard/           # Phase 5+: Streamlit dashboard (placeholder)
+│   └── tests/           # unit tests (aggregate_candles OHLC + alerts logic)
+└── dashboard/           # Phase 5: Streamlit + Plotly dashboard
+    ├── app.py
+    ├── requirements.txt
+    ├── Dockerfile
+    └── .streamlit/config.toml
 ```
 
 ## Services
@@ -55,6 +59,7 @@ tradepulse/
 | `postgres`   | `postgres:18`        | Pipeline schema, persistent named volume.                      |
 | `producer`   | built locally        | Coinbase Exchange WS to `trades.raw`.                          |
 | `spark_job`  | built locally        | Structured Streaming: `trades.raw` to 1-minute candles in Postgres. |
+| `dashboard`  | built locally        | Read-only Streamlit + Plotly UI on `http://localhost:8501`.    |
 
 ### Kafka listeners (host vs. in-network)
 
@@ -77,6 +82,11 @@ cp .env.example .env     # adjust POSTGRES_PASSWORD etc. if you like
 docker compose up -d --build
 docker compose ps        # kafka/postgres healthy, kafka-init exited 0, producer up
 ```
+
+Then open the dashboard at **http://localhost:8501**. Candles start filling in
+about two minutes after startup (1-minute window plus watermark); until then the
+dashboard shows a clear "waiting for data" state. The page auto-refreshes every
+10 seconds via `st.fragment(run_every="10s")`, no manual reload needed.
 
 ## Verifying Phase 3 (candles)
 
@@ -123,6 +133,9 @@ price and a message like `BTC-USD moved +0.42% in the 14:32-14:33 window`.
 Both the candle and alert inserts use `ON CONFLICT DO NOTHING` (keyed on
 `(symbol, window_start)` and `(symbol, ts)`), so a checkpoint-recovery replay is
 a safe no-op rather than a duplicate-key error.
+
+> The default `0.3` is demo-tuned so alerts are visibly firing, not a value
+> calibrated against real volatility. Set `ALERT_THRESHOLD_PCT` for your data.
 
 Lower the threshold to see alerts quickly (crypto rarely moves 0.3% in a single
 minute):

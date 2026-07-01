@@ -72,6 +72,9 @@ SPARK_PACKAGES = os.getenv(
 SPARK_IVY_DIR = os.getenv("SPARK_IVY_DIR", "/opt/.ivy2")
 
 # A finalized candle whose |open->close| move exceeds this percent raises an alert.
+# NOTE: 0.3 is a demo-tuned default chosen so alerts fire often enough to be
+# visible, not a value calibrated against real volatility distributions. Tune
+# via ALERT_THRESHOLD_PCT for your data / demo conditions.
 ALERT_THRESHOLD_PCT = float(os.getenv("ALERT_THRESHOLD_PCT", "0.3"))
 
 # Explicit schema for the trades.raw JSON value. Mirrors

@@ -124,6 +124,23 @@ services:
       # Persist streaming checkpoints so the job resumes after a restart.
       - spark_checkpoints:/opt/spark_checkpoints
 
+  dashboard:
+    build: ./dashboard
+    container_name: tradepulse-dashboard
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      PRODUCT_IDS: ${PRODUCT_IDS:-BTC-USD,ETH-USD,SOL-USD}
+    ports:
+      - "8501:8501"
+
 volumes:
   postgres_data:
   spark_checkpoints:
