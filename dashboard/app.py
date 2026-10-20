@@ -19,7 +19,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from plotly.subplots import make_subplots
-from sqlalchemy import create_engine, text
+from sqlalchemy import URL, create_engine, text
 
 # --- Config ----------------------------------------------------------------
 
@@ -60,9 +60,15 @@ st.set_page_config(page_title="TradePulse", page_icon="📈", layout="wide")
 
 @st.cache_resource
 def get_engine():
-    url = (
-        f"postgresql+psycopg2://{POSTGRES_USER}:{POSTGRES_PASSWORD}"
-        f"@{POSTGRES_HOST}:{POSTGRES_PORT}/{POSTGRES_DB}"
+    # URL.create escapes each part, so a password containing '@', ':' or '/'
+    # still connects (an f-string URL would be mis-parsed).
+    url = URL.create(
+        "postgresql+psycopg2",
+        username=POSTGRES_USER,
+        password=POSTGRES_PASSWORD,
+        host=POSTGRES_HOST,
+        port=int(POSTGRES_PORT),
+        database=POSTGRES_DB,
     )
     return create_engine(url, pool_pre_ping=True)
 
