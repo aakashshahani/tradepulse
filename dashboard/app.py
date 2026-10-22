@@ -31,6 +31,10 @@ POSTGRES_DB = os.getenv("POSTGRES_DB", "tradepulse")
 POSTGRES_USER = os.getenv("POSTGRES_USER", "tradepulse")
 POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "change_me")
 
+# A raw-trade price older than this is not shown as "live": if the producer is
+# down, its last rows would otherwise sit in raw_trades and look current.
+LIVE_PRICE_MAX_AGE_S = 120
+
 # Chart timeframe options (label -> lookback minutes; None means all history).
 TIMEFRAMES = {"30m": 30, "1h": 60, "3h": 180, "All": None}
 KPI_LOOKBACK_MIN = 20   # minutes used for the KPI window-change + sparkline
@@ -115,9 +119,10 @@ def live_prices(engine) -> dict:
     """Latest raw-trade price per symbol (the live ticker between candle closes)."""
     sql = text(
         "SELECT DISTINCT ON (symbol) symbol, price, ts "
-        "FROM raw_trades ORDER BY symbol, ts DESC"
+        "FROM raw_trades WHERE ts >= now() - (:secs * interval '1 second') "
+        "ORDER BY symbol, ts DESC"
     )
-    df = pd.read_sql(sql, engine)
+    df = pd.read_sql(sql, engine, params={"secs": LIVE_PRICE_MAX_AGE_S})
     return {r["symbol"]: float(r["price"]) for _, r in df.iterrows()}
 
 
