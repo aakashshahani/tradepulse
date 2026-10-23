@@ -104,6 +104,9 @@ services:
       COINBASE_WS_URL: ${COINBASE_WS_URL:-wss://ws-feed.exchange.coinbase.com}
       PRODUCT_IDS: ${PRODUCT_IDS:-BTC-USD,ETH-USD,SOL-USD}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      RAW_TRADES_ENABLED: ${RAW_TRADES_ENABLED:-true}
+      RAW_TRADES_FLUSH_S: ${RAW_TRADES_FLUSH_S:-1.0}
+      RAW_TRADES_RETENTION_MIN: ${RAW_TRADES_RETENTION_MIN:-10}
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
       POSTGRES_DB: ${POSTGRES_DB}
@@ -132,6 +135,8 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       CHECKPOINT_DIR: /opt/spark_checkpoints
       ALERT_THRESHOLD_PCT: ${ALERT_THRESHOLD_PCT:-0.3}
+      WINDOW_DURATION: ${WINDOW_DURATION:-1 minute}
+      WATERMARK_DELAY: ${WATERMARK_DELAY:-1 minute}
     volumes:
       # Persist streaming checkpoints so the job resumes after a restart.
       - spark_checkpoints:/opt/spark_checkpoints
