@@ -75,13 +75,13 @@ services:
     command:
       - |
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
-          --create --if-not-exists --topic trades.raw \
+          --create --if-not-exists --topic ${KAFKA_TOPIC:-trades.raw} \
           --partitions 6 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
-          --create --if-not-exists --topic trades.dlq \
+          --create --if-not-exists --topic ${DLQ_TOPIC:-trades.dlq} \
           --partitions 3 --replication-factor 1
         /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 \
-          --describe --topic trades.raw
+          --describe --topic ${KAFKA_TOPIC:-trades.raw}
 
   producer:
     build: ./producer
