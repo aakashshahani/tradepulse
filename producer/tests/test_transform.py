@@ -66,6 +66,15 @@ class TestTransformMatch(unittest.TestCase):
         with self.assertRaises(ValueError):
             transform_match(msg)
 
+    def test_out_of_contract_values_raise_valueerror(self):
+        for field, bad in (
+            ("price", "0"), ("price", "-1.5"), ("price", "nan"), ("price", "inf"),
+            ("size", "0"), ("size", "-0.1"), ("side", "hold"),
+        ):
+            with self.subTest(field=field, value=bad):
+                with self.assertRaises(ValueError):
+                    transform_match({**SAMPLE_MATCH, field: bad})
+
 
 if __name__ == "__main__":
     unittest.main()

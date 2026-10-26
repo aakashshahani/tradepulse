@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import random
 import signal
@@ -155,12 +156,26 @@ def publish_trade(producer: Producer, record: dict) -> None:
 
 
 def transform_match(msg: dict) -> dict:
-    """Map a Coinbase `match` message to our trades.raw schema."""
+    """Map a Coinbase `match` message to our trades.raw schema.
+
+    Enforces the schema's value constraints (price and size finite and > 0,
+    side buy/sell) as well as presence, raising ValueError otherwise: a zero or
+    NaN price would otherwise flow into the candle low and the alert % change.
+    """
+    price = float(msg["price"])
+    size = float(msg["size"])
+    side = msg["side"]
+    if not (math.isfinite(price) and price > 0):
+        raise ValueError(f"price must be finite and > 0, got {msg['price']!r}")
+    if not (math.isfinite(size) and size > 0):
+        raise ValueError(f"size must be finite and > 0, got {msg['size']!r}")
+    if side not in ("buy", "sell"):
+        raise ValueError(f"side must be buy or sell, got {side!r}")
     return {
         "symbol": msg["product_id"],
-        "price": float(msg["price"]),
-        "size": float(msg["size"]),
-        "side": msg["side"],
+        "price": price,
+        "size": size,
+        "side": side,
         "trade_id": msg["trade_id"],
         "ts": msg["time"],  # already ISO 8601 from Coinbase
     }
