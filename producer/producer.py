@@ -321,6 +321,21 @@ def _write_raw_trades(rows, cleanup: bool) -> None:
         _pg_conn = None
 
 
+def drain_latest_trades() -> list[tuple]:
+    """Take the latest trade per symbol seen since the last drain, and reset.
+
+    Re-sending a symbol's last trade every flush (when it hasn't traded again)
+    just inserts the same trade over and over. Runs on the event loop thread,
+    like handle_message, so the copy-and-clear can't interleave with an update.
+    """
+    rows = [
+        (r["symbol"], r["ts"], r["price"], r["size"])
+        for r in _latest_trades.values()
+    ]
+    _latest_trades.clear()
+    return rows
+
+
 async def raw_trades_loop(stop: asyncio.Event) -> None:
     """Flush the latest price per symbol to raw_trades ~once a second."""
     if not RAW_TRADES_ENABLED:
@@ -329,10 +344,7 @@ async def raw_trades_loop(stop: asyncio.Event) -> None:
     flushes = 0
     while not stop.is_set():
         await sleep_or_stop(RAW_TRADES_FLUSH_S, stop)
-        rows = [
-            (r["symbol"], r["ts"], r["price"], r["size"])
-            for r in list(_latest_trades.values())
-        ]
+        rows = drain_latest_trades()
         if not rows:
             continue
         flushes += 1

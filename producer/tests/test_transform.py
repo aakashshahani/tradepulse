@@ -7,7 +7,8 @@ Run from the /producer directory (so `producer` is importable):
 
 import unittest
 
-from producer import transform_match
+import producer
+from producer import drain_latest_trades, transform_match
 
 # A representative Coinbase `match` message (extra fields intentionally kept
 # to prove they're ignored).
@@ -74,6 +75,21 @@ class TestTransformMatch(unittest.TestCase):
             with self.subTest(field=field, value=bad):
                 with self.assertRaises(ValueError):
                     transform_match({**SAMPLE_MATCH, field: bad})
+
+
+class TestDrainLatestTrades(unittest.TestCase):
+    def setUp(self):
+        producer._latest_trades.clear()
+
+    def test_drains_once_then_empty_until_next_trade(self):
+        rec = transform_match(SAMPLE_MATCH)
+        producer._latest_trades[rec["symbol"]] = rec
+        self.assertEqual(
+            drain_latest_trades(),
+            [("BTC-USD", "2026-07-01T10:12:39.996920Z", 58699.73, 0.01234567)],
+        )
+        # no new trade -> nothing to write (previously the same row repeated)
+        self.assertEqual(drain_latest_trades(), [])
 
 
 if __name__ == "__main__":
