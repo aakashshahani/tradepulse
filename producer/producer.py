@@ -113,8 +113,19 @@ class ThroughputMeter:
         self._window_start = now
 
 
-def touch_heartbeat() -> None:
+# The HEALTHCHECK only needs second-level freshness; rewriting the file on every
+# message (hundreds per second in busy markets) is wasted syscalls on the loop.
+HEARTBEAT_MIN_INTERVAL_S = 1.0
+_last_heartbeat = 0.0
+
+
+def touch_heartbeat(force: bool = False) -> None:
     """Refresh the liveness file's mtime for the container HEALTHCHECK."""
+    global _last_heartbeat
+    now = time.monotonic()
+    if not force and now - _last_heartbeat < HEARTBEAT_MIN_INTERVAL_S:
+        return
+    _last_heartbeat = now
     try:
         with open(HEARTBEAT_FILE, "w") as f:
             f.write(str(time.time()))
@@ -255,7 +266,7 @@ async def stream_forever(producer: Producer, meter: ThroughputMeter, stop: async
             ) as ws:
                 log.info("connected; subscribing to %s", ", ".join(PRODUCT_IDS))
                 attempt = 0  # reset backoff on a successful connection
-                touch_heartbeat()
+                touch_heartbeat(force=True)
                 await ws.send(subscribe_message())
                 await consume(ws, producer, meter, stop)
         except asyncio.CancelledError:
@@ -370,7 +381,7 @@ async def main() -> None:
     )
     stop = asyncio.Event()
     install_signal_handlers(stop)
-    touch_heartbeat()  # seed the file so the HEALTHCHECK has something to read
+    touch_heartbeat(force=True)  # seed the file so the HEALTHCHECK has something to read
     start_http_server(METRICS_PORT)  # expose /metrics for Prometheus
 
     producer = build_producer()
