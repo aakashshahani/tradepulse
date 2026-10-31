@@ -51,3 +51,29 @@ def test_drops_rows_with_any_null_required_field(spark):
     kept = _rows(spark, rows)
     assert kept.count() == 1
     assert kept.collect()[0]["trade_id"] == 1
+
+
+def test_drops_rows_outside_the_schema_contract(spark):
+    rows = [
+        ("BTC-USD", 100.0, 1.0, "sell", 1, TS),          # valid
+        ("BTC-USD", 0.0, 1.0, "buy", 2, TS),             # zero price
+        ("BTC-USD", -5.0, 1.0, "buy", 3, TS),            # negative price
+        ("BTC-USD", 100.0, 0.0, "buy", 4, TS),           # zero size
+        ("BTC-USD", float("nan"), 1.0, "buy", 5, TS),    # NaN price
+        ("BTC-USD", 100.0, 1.0, "hold", 6, TS),          # unknown side
+    ]
+    kept = _rows(spark, rows)
+    assert [r["trade_id"] for r in kept.collect()] == [1]
+
+
+def test_malformed_split_is_the_exact_complement(spark):
+    rows = [
+        ("BTC-USD", 100.0, 1.0, "buy", 1, TS),
+        ("BTC-USD", None, 1.0, "buy", 2, TS),
+        ("BTC-USD", 0.0, 1.0, "buy", 3, TS),
+        (None, None, None, None, 4, None),
+    ]
+    df = spark.createDataFrame(rows, schema=PARSED_SCHEMA)
+    valid = df.filter(valid_condition()).count()
+    malformed = df.filter(~valid_condition()).count()
+    assert (valid, malformed) == (1, 3)

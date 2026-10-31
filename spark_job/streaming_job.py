@@ -202,8 +202,23 @@ def start_metrics_thread(spark: SparkSession, names: dict) -> None:
 
 
 def valid_condition():
-    """A row is valid only if every required field parsed to a non-null."""
-    return reduce(lambda a, b: a & b, [F.col(c).isNotNull() for c in REQUIRED_FIELDS])
+    """A row is valid only if every required field parsed to a non-null and the
+    values honour schemas/trades.raw.schema.json: price and size > 0, side buy or
+    sell. A zero/negative price would otherwise become a candle's low and skew the
+    alert % change; such rows go to the DLQ with the rest of the malformed ones.
+
+    The null checks come first in the AND, so a null field makes the whole
+    condition false (never SQL NULL) and ``~valid_condition()`` still selects it.
+    """
+    present = reduce(lambda a, b: a & b, [F.col(c).isNotNull() for c in REQUIRED_FIELDS])
+    in_contract = (
+        (F.col("price") > 0)
+        & (F.col("size") > 0)
+        & ~F.isnan("price")
+        & ~F.isnan("size")
+        & F.col("side").isin("buy", "sell")
+    )
+    return present & in_contract
 
 
 def parse_trades(raw_df: DataFrame) -> DataFrame:
