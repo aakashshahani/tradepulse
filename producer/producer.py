@@ -369,8 +369,10 @@ def install_signal_handlers(stop: asyncio.Event) -> None:
         try:
             loop.add_signal_handler(sig, stop.set)
         except NotImplementedError:
-            # Windows event loops don't support add_signal_handler.
-            signal.signal(sig, lambda *_: stop.set())
+            # Windows event loops don't support add_signal_handler. A plain
+            # handler runs outside the loop's control, so hand the set() back
+            # to the loop (asyncio.Event isn't safe to poke from elsewhere).
+            signal.signal(sig, lambda *_: loop.call_soon_threadsafe(stop.set))
 
 
 async def main() -> None:
