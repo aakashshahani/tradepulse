@@ -139,11 +139,13 @@ tradepulse/
 ## Observability
 
 - **Healthchecks** on every service: producer and spark_job use a heartbeat file
-  (refreshed on each trade / each streaming-progress event) checked by a Docker
+  (refreshed at most once a second while feed messages arrive / on each
+  streaming-progress event) checked by a Docker
   `HEALTHCHECK`; postgres uses `pg_isready`; kafka uses the broker API.
 - **Throughput logging** in the producer: per-symbol trades/sec roughly every
   10s, so liveness is visible without a consumer.
-- **Malformed-record handling.** Records that fail parsing are counted per batch,
+- **Malformed-record handling.** Records that fail parsing or break the schema's
+  value rules (non-positive price or size, unknown side) are counted per batch,
   accumulated in a `pipeline_metrics` table (surfaced on the dashboard), and
   republished with their original payload to a `trades.dlq` dead-letter topic for
   inspection or replay, rather than being silently dropped.
@@ -199,7 +201,8 @@ cd producer && pip install -r requirements.txt pytest && python -m pytest -q
 cd spark_job && pip install -r requirements.txt && python -m pytest -q
 ```
 
-Coverage: `transform_match` (producer); OHLC picking and the `(ts, trade_id)`
+Coverage: `transform_match` and its value checks, and the live-price flush
+(producer); OHLC picking and the `(ts, trade_id)`
 tie-break, `pct_change` and the alert threshold boundary, and the malformed-row
 filter (spark_job). An integration test spins up Postgres with testcontainers
 and runs the real sink end to end, asserting candles + alerts land and that a

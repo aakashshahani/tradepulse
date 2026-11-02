@@ -98,8 +98,9 @@ are the difference between a chart that informs and a chart that misleads.
 
 Deferred deliberately, not missing:
 
-- **Sub-second raw-trade ticker.** Persist individual trades to `raw_trades` so
-  the dashboard can show a live price between candle closes.
+- **Full raw-trade history.** `raw_trades` holds only the latest price per symbol
+  (about once a second, trimmed after a few minutes) for the dashboard's live
+  ticker; persisting every trade would enable tick-level replay and charts.
 - **Schema Registry.** Replace the JSON Schema contract with a registry-enforced
   schema for real producer/consumer compatibility guarantees.
 
